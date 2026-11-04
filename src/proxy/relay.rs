@@ -106,6 +106,34 @@ async fn relay(
         return ApiError::model_not_allowed(model).into_response();
     }
 
+    let now = time::OffsetDateTime::now_utc();
+    if let Some(limit) = auth.monthly_token_limit {
+        let used = {
+            let conn = match state.db.lock() {
+                Ok(conn) => conn,
+                Err(_) => return ApiError::internal().into_response(),
+            };
+            match db::month_tokens_used(&conn, auth.api_key_id, crate::quota::month_start_ms(now)) {
+                Ok(used) => used,
+                Err(err) => {
+                    tracing::error!(error = %err, "failed to sum monthly tokens");
+                    return ApiError::internal().into_response();
+                }
+            }
+        };
+        if used >= limit {
+            guard.status_code = Some(StatusCode::TOO_MANY_REQUESTS.as_u16() as i64);
+            guard.quota_exceeded = true;
+            guard.finish(Some("quota_exceeded"), None, false);
+            return ApiError::insufficient_quota(crate::quota::retry_after_seconds(now))
+                .into_response();
+        }
+        guard.quota = Some(QuotaBudget {
+            limit,
+            used_before: used,
+        });
+    }
+
     let url = format!(
         "{}{}",
         state.config.upstream_base_url.trim_end_matches('/'),
@@ -320,12 +348,20 @@ impl Drop for StreamRelay {
     }
 }
 
+#[derive(Clone, Copy)]
+struct QuotaBudget {
+    limit: i64,
+    used_before: i64,
+}
+
 struct RequestGuard {
     state: AppState,
     id: i64,
     started: Instant,
     status_code: Option<i64>,
     ttft_ms: Option<i64>,
+    quota: Option<QuotaBudget>,
+    quota_exceeded: bool,
     finished: bool,
 }
 
@@ -337,6 +373,8 @@ impl RequestGuard {
             started,
             status_code: None,
             ttft_ms: None,
+            quota: None,
+            quota_exceeded: false,
             finished: false,
         }
     }
@@ -359,6 +397,11 @@ impl RequestGuard {
         let Ok(conn) = self.state.db.lock() else {
             return;
         };
+        let mut quota_exceeded = self.quota_exceeded;
+        if let (Some(budget), Some(usage)) = (self.quota, usage) {
+            quota_exceeded |=
+                budget.used_before + usage.input_tokens + usage.output_tokens > budget.limit;
+        }
         let latency_ms = self.started.elapsed().as_millis() as i64;
         if let Err(err) = db::finish_request(
             &conn,
@@ -370,6 +413,7 @@ impl RequestGuard {
             usage,
             error_kind,
             aborted,
+            quota_exceeded,
         ) {
             tracing::error!(error = %err, "failed to update request row");
         }

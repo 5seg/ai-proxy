@@ -2,6 +2,7 @@ mod config;
 mod db;
 mod key;
 mod proxy;
+mod quota;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

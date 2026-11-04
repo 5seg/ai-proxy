@@ -10,6 +10,7 @@ use crate::proxy::usage::Usage;
 pub struct KeyAuth {
     pub id: i64,
     pub device_id: i64,
+    pub monthly_token_limit: Option<i64>,
     pub revoked: bool,
 }
 
@@ -159,7 +160,8 @@ pub fn revoke_keys(conn: &Connection, prefix: &str, now: i64) -> Result<usize> {
 }
 
 pub fn find_key(conn: &Connection, hash: &[u8; 32]) -> Result<Option<KeyAuth>> {
-    let mut stmt = conn.prepare("SELECT id, device_id, key_hash, revoked_at FROM api_key")?;
+    let mut stmt =
+        conn.prepare("SELECT id, device_id, key_hash, revoked_at, monthly_token_limit FROM api_key")?;
     let mut rows = stmt.query([])?;
     let mut found = None;
     while let Some(row) = rows.next()? {
@@ -169,6 +171,7 @@ pub fn find_key(conn: &Connection, hash: &[u8; 32]) -> Result<Option<KeyAuth>> {
             found = Some(KeyAuth {
                 id: row.get(0)?,
                 device_id: row.get(1)?,
+                monthly_token_limit: row.get(4)?,
                 revoked: revoked_at.is_some(),
             });
         }
@@ -203,6 +206,16 @@ pub fn insert_request(conn: &Connection, request: &NewRequest<'_>) -> Result<i64
     Ok(conn.last_insert_rowid())
 }
 
+pub fn month_tokens_used(conn: &Connection, api_key_id: i64, since: i64) -> Result<i64> {
+    let total: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)
+         FROM request WHERE api_key_id = ?1 AND started_at >= ?2",
+        params![api_key_id, since],
+        |row| row.get(0),
+    )?;
+    Ok(total)
+}
+
 pub fn finish_request(
     conn: &Connection,
     id: i64,
@@ -213,6 +226,7 @@ pub fn finish_request(
     usage: Option<&Usage>,
     error_kind: Option<&str>,
     aborted: bool,
+    quota_exceeded: bool,
 ) -> Result<()> {
     let (source, input, cached, cache_write, output, reasoning) = match usage {
         Some(usage) => (
@@ -230,7 +244,7 @@ pub fn finish_request(
            finished_at = ?2, status_code = ?3, latency_ms = ?4, ttft_ms = ?5,
            input_tokens = ?6, cached_input_tokens = ?7, cache_write_tokens = ?8,
            output_tokens = ?9, reasoning_tokens = ?10, usage_source = ?11,
-           error_kind = ?12, aborted = ?13
+           error_kind = ?12, aborted = ?13, quota_exceeded = ?14
          WHERE id = ?1 AND finished_at IS NULL",
         params![
             id,
@@ -246,6 +260,7 @@ pub fn finish_request(
             source,
             error_kind,
             aborted as i64,
+            quota_exceeded as i64,
         ],
     )?;
     Ok(())

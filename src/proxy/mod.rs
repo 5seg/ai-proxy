@@ -55,6 +55,7 @@ pub struct ApiError {
     code: &'static str,
     message: String,
     www_authenticate: bool,
+    retry_after: Option<i64>,
 }
 
 impl ApiError {
@@ -64,6 +65,7 @@ impl ApiError {
             code: "invalid_api_key",
             message: "invalid API key".to_string(),
             www_authenticate: true,
+            retry_after: None,
         }
     }
 
@@ -73,6 +75,7 @@ impl ApiError {
             code: "model_not_allowed",
             message: format!("model `{model}` is not allowed"),
             www_authenticate: false,
+            retry_after: None,
         }
     }
 
@@ -82,6 +85,7 @@ impl ApiError {
             code: "model_not_allowed",
             message: format!("model `{model}` is not found"),
             www_authenticate: false,
+            retry_after: None,
         }
     }
 
@@ -91,6 +95,7 @@ impl ApiError {
             code: "not_found",
             message: "not found".to_string(),
             www_authenticate: false,
+            retry_after: None,
         }
     }
 
@@ -100,6 +105,17 @@ impl ApiError {
             code: "invalid_request",
             message: message.to_string(),
             www_authenticate: false,
+            retry_after: None,
+        }
+    }
+
+    pub fn insufficient_quota(retry_after_seconds: i64) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "insufficient_quota",
+            message: "monthly token limit reached".to_string(),
+            www_authenticate: false,
+            retry_after: Some(retry_after_seconds),
         }
     }
 
@@ -109,6 +125,7 @@ impl ApiError {
             code: "upstream_unavailable",
             message: "upstream unavailable".to_string(),
             www_authenticate: false,
+            retry_after: None,
         }
     }
 
@@ -118,6 +135,7 @@ impl ApiError {
             code: "internal_error",
             message: "internal error".to_string(),
             www_authenticate: false,
+            retry_after: None,
         }
     }
 }
@@ -129,6 +147,7 @@ impl IntoResponse for ApiError {
             code,
             message,
             www_authenticate,
+            retry_after,
         } = self;
         let body = Json(json!({
             "error": {
@@ -142,6 +161,11 @@ impl IntoResponse for ApiError {
             response
                 .headers_mut()
                 .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
+        if let Some(seconds) = retry_after {
+            if let Ok(value) = HeaderValue::from_str(&seconds.max(1).to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
         }
         response
     }
