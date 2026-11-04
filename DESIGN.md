@@ -63,6 +63,19 @@ cache_write     = cache_write_tokens ?? cache_creation_input_tokens ?? 0
 reasoning       = completion_tokens_details.reasoning_tokens ?? 0
 ```
 
+`/v1/responses` はフィールド名が違う。単価は同じ扱いでよい。
+
+```
+input     = input_tokens            (chat の prompt_tokens に相当)
+output    = output_tokens           (chat の completion_tokens に相当)
+cached    = input_tokens_details.cached_tokens
+reasoning = output_tokens_details.reasoning_tokens
+```
+
+ストリーミング時の入れ子も違う。chat は `data` 直下の `usage`、responses は最終イベントの `response.usage` に入る。どちらも同じ抽出器で読む。
+
+responses は上流の既定でキャッシュが無効(`"caching":{"type":"disabled"}`)なので、`cached_input` は 0 になる。
+
 内部表現は次の5つに固定する。
 
 ```

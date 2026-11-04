@@ -12,35 +12,38 @@ pub struct Usage {
 }
 
 pub fn extract(value: &Value) -> Option<Usage> {
-    let usage = value.get("usage")?.as_object()?;
-    let prompt = usage.get("prompt_tokens").and_then(Value::as_i64);
-    let completion = usage.get("completion_tokens").and_then(Value::as_i64);
+    if let Some(usage) = value.get("usage").and_then(extract_usage) {
+        return Some(usage);
+    }
+    value
+        .get("response")
+        .and_then(|response| response.get("usage"))
+        .and_then(extract_usage)
+}
+
+fn extract_usage(usage: &Value) -> Option<Usage> {
+    if !usage.is_object() {
+        return None;
+    }
+    let prompt = first_int(usage, &["prompt_tokens", "input_tokens"]);
+    let completion = first_int(usage, &["completion_tokens", "output_tokens"]);
     if prompt.is_none() && completion.is_none() {
         return None;
     }
-    let details = usage.get("prompt_tokens_details");
-    let cached = details
-        .and_then(|value| value.get("cached_tokens"))
-        .and_then(Value::as_i64)
-        .or_else(|| {
-            details
-                .and_then(|value| value.get("cache_read_input_tokens"))
-                .and_then(Value::as_i64)
-        })
-        .unwrap_or(0);
-    let cache_write = details
-        .and_then(|value| value.get("cache_write_tokens"))
-        .and_then(Value::as_i64)
-        .or_else(|| {
-            details
-                .and_then(|value| value.get("cache_creation_input_tokens"))
-                .and_then(Value::as_i64)
-        })
-        .unwrap_or(0);
-    let reasoning = usage
+    let input_details = usage
+        .get("prompt_tokens_details")
+        .or_else(|| usage.get("input_tokens_details"));
+    let output_details = usage
         .get("completion_tokens_details")
-        .and_then(|value| value.get("reasoning_tokens"))
-        .and_then(Value::as_i64)
+        .or_else(|| usage.get("output_tokens_details"));
+    let cached = input_details
+        .and_then(|details| first_int(details, &["cached_tokens", "cache_read_input_tokens"]))
+        .unwrap_or(0);
+    let cache_write = input_details
+        .and_then(|details| first_int(details, &["cache_write_tokens", "cache_creation_input_tokens"]))
+        .unwrap_or(0);
+    let reasoning = output_details
+        .and_then(|details| first_int(details, &["reasoning_tokens"]))
         .unwrap_or(0);
     Some(Usage {
         input_tokens: prompt.unwrap_or(0),
@@ -49,6 +52,11 @@ pub fn extract(value: &Value) -> Option<Usage> {
         output_tokens: completion.unwrap_or(0),
         reasoning_tokens: reasoning,
     })
+}
+
+fn first_int(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_i64))
 }
 
 pub struct SseUsageScanner {
@@ -93,13 +101,10 @@ impl SseUsageScanner {
             return;
         }
         let buffer = std::mem::take(&mut self.buffer);
-        match buffer.rsplit(|byte| *byte == b'\n').next() {
-            Some(tail) if !tail.is_empty() => {
-                if let Some(usage) = parse_line(tail) {
-                    self.usage = Some(usage);
-                }
+        if let Some(tail) = buffer.rsplit(|byte| *byte == b'\n').next() {
+            if let Some(usage) = parse_line(tail) {
+                self.usage = Some(usage);
             }
-            _ => {}
         }
     }
 

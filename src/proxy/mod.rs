@@ -1,6 +1,6 @@
 pub mod auth;
-pub mod chat;
 pub mod models;
+pub mod relay;
 pub mod usage;
 
 use std::sync::{Arc, Mutex};
@@ -34,7 +34,8 @@ pub fn router(config: Config, conn: Connection, client: reqwest::Client) -> Rout
     let v1 = Router::new()
         .route("/models", get(models::list))
         .route("/models/{*id}", get(models::get))
-        .route("/chat/completions", post(chat::handle));
+        .route("/chat/completions", post(relay::chat_completions))
+        .route("/responses", post(relay::responses));
 
     Router::new()
         .route("/healthz", get(healthz))

@@ -15,15 +15,45 @@ use crate::proxy::auth::{self, AuthContext};
 use crate::proxy::usage::{self, SseUsageScanner, Usage};
 use crate::proxy::{ApiError, AppState};
 
-const ENDPOINT: &str = "chat_completions";
 const PROMPT_HASH_LIMIT: usize = 4096;
 
-pub async fn handle(
-    State(state): State<AppState>,
+pub async fn chat_completions(
+    state: State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Extension(auth): Extension<AuthContext>,
     headers: HeaderMap,
     body: Bytes,
+) -> Response {
+    relay(
+        state.0,
+        addr,
+        auth,
+        headers,
+        body,
+        "chat_completions",
+        "/chat/completions",
+    )
+    .await
+}
+
+pub async fn responses(
+    state: State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    relay(state.0, addr, auth, headers, body, "responses", "/responses").await
+}
+
+async fn relay(
+    state: AppState,
+    addr: SocketAddr,
+    auth: AuthContext,
+    headers: HeaderMap,
+    body: Bytes,
+    endpoint: &'static str,
+    upstream_path: &str,
 ) -> Response {
     let payload: Value = match serde_json::from_slice(&body) {
         Ok(payload) => payload,
@@ -48,7 +78,7 @@ pub async fn handle(
             device_id: auth.device_id,
             api_key_id: auth.api_key_id,
             client_ip: &client_ip,
-            endpoint: ENDPOINT,
+            endpoint,
             model,
             stream: meta.stream,
             prompt_hash: &prompt_hash,
@@ -77,8 +107,9 @@ pub async fn handle(
     }
 
     let url = format!(
-        "{}/chat/completions",
-        state.config.upstream_base_url.trim_end_matches('/')
+        "{}{}",
+        state.config.upstream_base_url.trim_end_matches('/'),
+        upstream_path
     );
     let mut upstream_request = state.client.post(url).body(body);
     if let Some(value) = headers.get(header::CONTENT_TYPE) {
@@ -164,22 +195,46 @@ struct RequestMeta {
 
 impl RequestMeta {
     fn from_payload(payload: &Value) -> Self {
-        let messages = payload
+        let (message_count, prompt_chars, has_image) = match payload
             .get("messages")
             .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
+        {
+            Some(messages) => (
+                messages.len() as i64,
+                count_prompt_chars(messages),
+                has_image(messages),
+            ),
+            None => match payload.get("input").and_then(Value::as_array) {
+                Some(items) => (
+                    items.len() as i64,
+                    count_prompt_chars(items),
+                    has_image(items),
+                ),
+                None => (
+                    0,
+                    payload
+                        .get("input")
+                        .and_then(Value::as_str)
+                        .map(|text| text.chars().count() as i64)
+                        .unwrap_or(0),
+                    false,
+                ),
+            },
+        };
         Self {
             stream: payload
                 .get("stream")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
-            message_count: messages.len() as i64,
-            prompt_chars: count_prompt_chars(messages),
+            message_count,
+            prompt_chars,
             has_tools: payload.get("tools").is_some(),
-            has_image: has_image(messages),
+            has_image,
             temperature: payload.get("temperature").and_then(Value::as_f64),
-            max_tokens: payload.get("max_tokens").and_then(Value::as_i64),
+            max_tokens: payload
+                .get("max_tokens")
+                .and_then(Value::as_i64)
+                .or_else(|| payload.get("max_output_tokens").and_then(Value::as_i64)),
         }
     }
 }
@@ -202,17 +257,20 @@ fn count_prompt_chars(messages: &[Value]) -> i64 {
     total
 }
 
-fn has_image(messages: &[Value]) -> bool {
-    messages.iter().any(|message| {
-        message
-            .get("content")
-            .and_then(Value::as_array)
-            .is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|item| item.get("type").and_then(Value::as_str) == Some("image_url"))
-            })
-    })
+fn has_image(items: &[Value]) -> bool {
+    items
+        .iter()
+        .any(|item| match item.get("content") {
+            Some(Value::Array(content)) => content.iter().any(is_image_part),
+            _ => is_image_part(item),
+        })
+}
+
+fn is_image_part(part: &Value) -> bool {
+    matches!(
+        part.get("type").and_then(Value::as_str),
+        Some("image_url") | Some("input_image")
+    )
 }
 
 struct StreamRelay {
