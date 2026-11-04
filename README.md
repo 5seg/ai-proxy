@@ -58,6 +58,7 @@ ai-proxy config --config ./ai-proxy.toml
 | `max_body_bytes` | `AI_PROXY_MAX_BODY_BYTES` | `67108864` (64 MiB) |
 | `connect_timeout_secs` | `AI_PROXY_CONNECT_TIMEOUT_SECS` | `10` |
 | `read_timeout_secs` | `AI_PROXY_READ_TIMEOUT_SECS` | `300` |
+| `models_ttl_secs` | `AI_PROXY_MODELS_TTL_SECS` | `300`(0 でキャッシュしない) |
 
 環境変数は設定ファイルより優先する。`AI_PROXY_MODELS` を設定すると許可モデルが丸ごと置き換わる。
 `RUST_LOG` はそのまま効く(`RUST_LOG=ai_proxy=debug`)。
@@ -162,9 +163,18 @@ unit は `StateDirectory=ai-proxy` を使い、DB を `/var/lib/ai-proxy/usage.d
 | パス | 用途 |
 | --- | --- |
 | `GET /healthz` | 認証不要の生存確認。DB に1クエリ投げる |
-| `GET /v1/models` | 許可モデルの一覧 |
-| `GET /v1/models/{id}` | 許可モデル1件 |
+| `GET /v1/models` | 制限付きキーには許可モデル、`--all-models` キーには上流の全モデル |
+| `GET /v1/models/{id}` | 制限付きキーは許可モデルのみ(それ以外 404)。`--all-models` キーは任意の id に 200 |
 | `POST /v1/chat/completions` | 中継(ストリーム対応) |
 | `POST /v1/responses` | 中継(ストリーム対応) |
 
 `/v1/*` はすべてキー必須。上流には `Authorization` を付け替えて転送し、`user` フィールドは改変しない。
+
+```bash
+curl -s localhost:8787/v1/models                                    # 401
+curl -s localhost:8787/v1/models -H "Authorization: Bearer $K"      # 許可モデルだけ
+```
+
+`--all-models` キーで `/v1/models` を叩くと、上流の `GET /models` をそのまま返す
+(`context_length` や `supported_endpoints` も含む)。結果は `models_ttl_secs`(既定 300 秒)キャッシュし、
+上流が落ちているときは許可モデルの一覧に退避して警告ログを出す。

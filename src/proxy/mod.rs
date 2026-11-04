@@ -22,6 +22,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub db: Arc<Mutex<Connection>>,
     pub client: reqwest::Client,
+    /// Fetched upstream `/models` bodies, keyed by the instant the fetch finished.
+    pub models_cache: Arc<Mutex<Option<(Instant, serde_json::Value)>>>,
 }
 
 pub fn router(config: Config, conn: Connection, client: reqwest::Client) -> Router {
@@ -30,6 +32,7 @@ pub fn router(config: Config, conn: Connection, client: reqwest::Client) -> Rout
         config: Arc::new(config),
         db: Arc::new(Mutex::new(conn)),
         client,
+        models_cache: Arc::new(Mutex::new(None)),
     };
 
     let v1 = Router::new()

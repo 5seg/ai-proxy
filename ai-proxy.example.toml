@@ -26,6 +26,10 @@ id = "deepseek/deepseek-v4.1-flash"
 # connect_timeout_secs = 10
 # read_timeout_secs = 300
 
+# 上流のモデル一覧をキャッシュする秒数。--all-models キーが /v1/models を叩いたときだけ使う。
+# 0 にすると毎回取りに行く。
+# models_ttl_secs = 300
+
 # 環境変数 AI_PROXY_* はこのファイルより優先する。
 #   AI_PROXY_UPSTREAM_API_KEY はファイルに書きたくないときに使う。
 #   AI_PROXY_MODELS="a/b,c/d" は models を丸ごと置き換える。

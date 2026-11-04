@@ -31,6 +31,8 @@ pub struct Config {
     pub connect_timeout_secs: u64,
     #[serde(default = "default_read_timeout_secs")]
     pub read_timeout_secs: u64,
+    #[serde(default = "default_models_ttl_secs")]
+    pub models_ttl_secs: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +84,7 @@ fn load(path: &Path) -> Result<(Config, Vec<Setting>)> {
             max_body_bytes: default_max_body_bytes(),
             connect_timeout_secs: default_connect_timeout_secs(),
             read_timeout_secs: default_read_timeout_secs(),
+            models_ttl_secs: default_models_ttl_secs(),
         },
     };
 
@@ -167,6 +170,13 @@ fn load(path: &Path) -> Result<(Config, Vec<Setting>)> {
         in_file("read_timeout_secs"),
         &mut sources,
     )?;
+    override_parsed(
+        &mut config.models_ttl_secs,
+        "MODELS_TTL_SECS",
+        "models_ttl_secs",
+        in_file("models_ttl_secs"),
+        &mut sources,
+    )?;
 
     if config.models.is_empty() {
         bail!("at least one model must be configured");
@@ -241,6 +251,11 @@ fn load(path: &Path) -> Result<(Config, Vec<Setting>)> {
             name: "read_timeout_secs".to_string(),
             value: config.read_timeout_secs.to_string(),
             source: source_of("read_timeout_secs", &sources),
+        },
+        Setting {
+            name: "models_ttl_secs".to_string(),
+            value: config.models_ttl_secs.to_string(),
+            source: source_of("models_ttl_secs", &sources),
         },
     ];
 
@@ -367,5 +382,9 @@ fn default_connect_timeout_secs() -> u64 {
 }
 
 fn default_read_timeout_secs() -> u64 {
+    300
+}
+
+fn default_models_ttl_secs() -> u64 {
     300
 }
