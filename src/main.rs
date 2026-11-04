@@ -100,6 +100,10 @@ async fn serve(config_path: &Path) -> Result<()> {
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind {addr}"))?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("failed to build HTTP client")?;
 
     tracing::info!(listen = %addr, "listening");
     tracing::info!(db_path = %config.db_path.display(), "database");
@@ -107,11 +111,14 @@ async fn serve(config_path: &Path) -> Result<()> {
         tracing::info!(model = %model.id, "allowed model");
     }
 
-    let app = proxy::router(config, conn);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server failed")
+    let app = proxy::router(config, conn, client);
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("server failed")
 }
 
 async fn shutdown_signal() {
@@ -214,7 +221,7 @@ fn revoke_key(conn: &Connection, prefix: &str) -> Result<()> {
     Ok(())
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
 }
 

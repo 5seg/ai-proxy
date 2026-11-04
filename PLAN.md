@@ -31,7 +31,7 @@ DESIGN.md の決定を前提に、作業を分割したもの。金額と料金�
 cost = ((input - cached) * 0.15 + cached * 0.003 + output * 0.60) / 1_000_000.0;
 ```
 
-`input < cached` になった場合は差し引きをやめ、`input * 0.15 + cached * 0.003` に切り替える(フェーズ2の実測で確定)。
+`prompt_tokens` が `cached_tokens` を含むことは実測で確定した(同一プロンプトの2回目で `prompt_tokens` 3398 のまま `cached_tokens` 3328)。差し引きは必須。`input < cached` になる異常値だけ、差し引きをやめて `input * 0.15 + cached * 0.003` に切り替える。
 
 ## 3. 技術スタック
 
@@ -207,14 +207,14 @@ Bearer 照合、失効判定、許可モデルの完全一致判定、`/v1/model
 - 400/500 系は `error_kind` 付きで記録され、クライアントに本文がそのまま渡る
 
 ### フェーズ 3: ストリーミング(4〜5時間)
-SSE をチャンク単位で中継、`stream_options.include_usage` の注入、usage チャンクの下流除去、TTFT 計測、切断検知。
+SSE をチャンク単位で中継し、最終チャンクの usage を読む。TTFT を計測し、切断を検知する。
 完了:
 - `curl -N` でトークンが流れる
-- 注入した場合も下流には usage チャンクが出ない
-- 下流が usage を要求していた場合は素通しされる
-- 上流が `stream_options` を受け付けない場合の再送経路が動き、`usage_source=unknown` が記録される
+- 上流の usage が `request` に入る
 - 途中で Ctrl-C → `aborted=1`、上流接続も切れる
 - 30秒以上の生成でタイムアウトしない(総タイムアウトは設定しない。接続と無通信だけ見る)
+
+上流は `stream_options.include_usage` を付けなくても最終チャンクに `usage` を返すため、リクエストボディの書き換えとチャンクの除去は行わない。usage が欠けた場合だけ `usage_source=unknown` とする。
 
 ### フェーズ 4: /v1/responses(2〜3時間)
 パススルーと、`response.completed` からの usage 抽出。
@@ -270,8 +270,8 @@ curl -s localhost:8787/v1/chat/completions -H "Authorization: Bearer $K" \
 
 ## 8. 実装中に潰す確認点
 
-1. `prompt_tokens` が cached を含むか(コスト式の符号が変わる)
-2. 上流が `stream_options.include_usage` を受け付けるか(フォールバック経路の要否)
+1. ~~`prompt_tokens` が cached を含むか~~ → 含む(実測)。コスト式は差し引きで確定
+2. ~~上流が `stream_options.include_usage` を受け付けるか~~ → 付けなくても usage が返る。ボディ書き換えは不要
 3. `/v1/responses` のストリームで usage が来るか
 4. axum のボディ上限。1M コンテキストを想定すると `DefaultBodyLimit` の既定 2MB では足りない。64MB に上げる
 5. 上流が返す `model` 名が要求と一致するか(応答に別名が入ると TUI の集計軸がぶれる)

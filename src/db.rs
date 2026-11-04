@@ -5,9 +5,29 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 
 use crate::key;
+use crate::proxy::usage::Usage;
 
 pub struct KeyAuth {
+    pub id: i64,
+    pub device_id: i64,
     pub revoked: bool,
+}
+
+pub struct NewRequest<'a> {
+    pub started_at: i64,
+    pub device_id: i64,
+    pub api_key_id: i64,
+    pub client_ip: &'a str,
+    pub endpoint: &'a str,
+    pub model: &'a str,
+    pub stream: bool,
+    pub prompt_hash: &'a [u8; 32],
+    pub message_count: i64,
+    pub prompt_chars: i64,
+    pub has_tools: bool,
+    pub has_image: bool,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<i64>,
 }
 
 pub struct KeyListRow {
@@ -139,17 +159,96 @@ pub fn revoke_keys(conn: &Connection, prefix: &str, now: i64) -> Result<usize> {
 }
 
 pub fn find_key(conn: &Connection, hash: &[u8; 32]) -> Result<Option<KeyAuth>> {
-    let mut stmt = conn.prepare("SELECT key_hash, revoked_at FROM api_key")?;
+    let mut stmt = conn.prepare("SELECT id, device_id, key_hash, revoked_at FROM api_key")?;
     let mut rows = stmt.query([])?;
     let mut found = None;
     while let Some(row) = rows.next()? {
-        let stored: Vec<u8> = row.get(0)?;
-        let revoked_at: Option<i64> = row.get(1)?;
+        let stored: Vec<u8> = row.get(2)?;
         if key::constant_time_eq(&stored, hash) {
-            found = Some(revoked_at.is_some());
+            let revoked_at: Option<i64> = row.get(3)?;
+            found = Some(KeyAuth {
+                id: row.get(0)?,
+                device_id: row.get(1)?,
+                revoked: revoked_at.is_some(),
+            });
         }
     }
-    Ok(found.map(|revoked| KeyAuth { revoked }))
+    Ok(found)
+}
+
+pub fn insert_request(conn: &Connection, request: &NewRequest<'_>) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO request
+         (started_at, device_id, api_key_id, client_ip, endpoint, model, stream,
+          usage_source, prompt_hash, message_count, prompt_chars, has_tools, has_image,
+          temperature, max_tokens)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'unknown', ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            request.started_at,
+            request.device_id,
+            request.api_key_id,
+            request.client_ip,
+            request.endpoint,
+            request.model,
+            request.stream as i64,
+            request.prompt_hash.as_slice(),
+            request.message_count,
+            request.prompt_chars,
+            request.has_tools as i64,
+            request.has_image as i64,
+            request.temperature,
+            request.max_tokens,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn finish_request(
+    conn: &Connection,
+    id: i64,
+    finished_at: i64,
+    status_code: Option<i64>,
+    latency_ms: Option<i64>,
+    ttft_ms: Option<i64>,
+    usage: Option<&Usage>,
+    error_kind: Option<&str>,
+    aborted: bool,
+) -> Result<()> {
+    let (source, input, cached, cache_write, output, reasoning) = match usage {
+        Some(usage) => (
+            "upstream",
+            Some(usage.input_tokens),
+            Some(usage.cached_input_tokens),
+            Some(usage.cache_write_tokens),
+            Some(usage.output_tokens),
+            Some(usage.reasoning_tokens),
+        ),
+        None => ("unknown", None, None, None, None, None),
+    };
+    conn.execute(
+        "UPDATE request SET
+           finished_at = ?2, status_code = ?3, latency_ms = ?4, ttft_ms = ?5,
+           input_tokens = ?6, cached_input_tokens = ?7, cache_write_tokens = ?8,
+           output_tokens = ?9, reasoning_tokens = ?10, usage_source = ?11,
+           error_kind = ?12, aborted = ?13
+         WHERE id = ?1 AND finished_at IS NULL",
+        params![
+            id,
+            finished_at,
+            status_code,
+            latency_ms,
+            ttft_ms,
+            input,
+            cached,
+            cache_write,
+            output,
+            reasoning,
+            source,
+            error_kind,
+            aborted as i64,
+        ],
+    )?;
+    Ok(())
 }
 
 const MIGRATION_V1: &str = r#"

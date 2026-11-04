@@ -53,11 +53,15 @@ ai-proxy export [--csv]
 
 上流が返す usage をそのまま使う。独自のトークナイズはしない。
 
-ストリーミングでは、クライアントが `stream_options.include_usage` を付けないと usage が返らない。そこで次のように処理する。
+ストリーミングでも、上流は `stream_options.include_usage` を付けずに最終チャンクへ `usage` を入れで返す(実測)。よってリクエストボディは書き換えず、チャンクも除去しない。応答を中継しながら最終チャンクの `usage` を読むだけでよい。usage が欠けた場合だけ `usage_source = unknown` とする。
 
-1. 上流へ送る前に、ボディの `stream_options.include_usage` を `true` に書き換える。
-2. 上流から届く usage だけのチャンクは、クライアントが元々指定していなければ下流に流さない。
-3. 上流が `stream_options` を受け付けない場合は、注入せずに再送し、`usage_source = unknown` として記録する。
+上流の `prompt_tokens_details` は次のように写す。プロバイダによって埋まるキーが違うので、両方を見る。
+
+```
+cached_input    = cached_tokens   ?? cache_read_input_tokens   ?? 0
+cache_write     = cache_write_tokens ?? cache_creation_input_tokens ?? 0
+reasoning       = completion_tokens_details.reasoning_tokens ?? 0
+```
 
 内部表現は次の5つに固定する。
 
@@ -77,7 +81,7 @@ reasoning_tokens      うち推論分(output に含まれる実装があるの�
 rate = cached_input / (input + cached_input + cache_write)
 ```
 
-分母にキャッシュ書き込みを含めるのは、Anthropic 系のプロバイダが `input_tokens` にキャッシュ分を含めないためである。この定義を TUI の画面に1行で表示する。
+分母にキャッシュ書き込みを含めるのは、Anthropic 系のプロバイダが `input_tokens` にキャッシュ分を含めないためである。この定義を TUI の画面に1行で表示する。command-code では `prompt_tokens` がキャッシュ分を含むことを実測で確認済みで、コスト計算では差し引く。
 
 ## 6. クォータ
 

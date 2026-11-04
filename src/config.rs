@@ -11,10 +11,8 @@ pub struct Config {
     pub listen: String,
     #[serde(default = "default_db_path")]
     pub db_path: PathBuf,
-    #[allow(dead_code)]
     #[serde(default = "default_upstream_base_url")]
     pub upstream_base_url: String,
-    #[allow(dead_code)]
     #[serde(default)]
     pub upstream_api_key: String,
     #[serde(default)]

@@ -1,11 +1,12 @@
 pub mod auth;
+pub mod chat;
 pub mod models;
+pub mod usage;
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -20,18 +21,20 @@ use crate::config::Config;
 pub struct AppState {
     pub config: Arc<Config>,
     pub db: Arc<Mutex<Connection>>,
+    pub client: reqwest::Client,
 }
 
-pub fn router(config: Config, conn: Connection) -> Router {
+pub fn router(config: Config, conn: Connection, client: reqwest::Client) -> Router {
     let state = AppState {
         config: Arc::new(config),
         db: Arc::new(Mutex::new(conn)),
+        client,
     };
 
     let v1 = Router::new()
         .route("/models", get(models::list))
         .route("/models/{*id}", get(models::get))
-        .route("/chat/completions", post(chat_completions));
+        .route("/chat/completions", post(chat::handle));
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -99,11 +102,11 @@ impl ApiError {
         }
     }
 
-    pub fn not_implemented() -> Self {
+    pub fn upstream_unavailable() -> Self {
         Self {
-            status: StatusCode::NOT_IMPLEMENTED,
-            code: "not_implemented",
-            message: "not implemented".to_string(),
+            status: StatusCode::BAD_GATEWAY,
+            code: "upstream_unavailable",
+            message: "upstream unavailable".to_string(),
             www_authenticate: false,
         }
     }
@@ -149,21 +152,6 @@ async fn healthz() -> Json<serde_json::Value> {
 
 async fn not_found() -> ApiError {
     ApiError::not_found()
-}
-
-async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Response {
-    let payload: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(payload) => payload,
-        Err(_) => return ApiError::bad_request("invalid JSON body").into_response(),
-    };
-    let model = match payload.get("model").and_then(serde_json::Value::as_str) {
-        Some(model) => model,
-        None => return ApiError::bad_request("missing model").into_response(),
-    };
-    if !auth::is_model_allowed(&state.config, model) {
-        return ApiError::model_not_allowed(model).into_response();
-    }
-    ApiError::not_implemented().into_response()
 }
 
 async fn log_requests(request: Request, next: Next) -> Response {
