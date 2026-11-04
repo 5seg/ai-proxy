@@ -1,0 +1,8 @@
+listen = "0.0.0.0:8787"
+# 絶対パスで書く。~ は展開しない。省略時は $HOME/.local/share/ai-proxy/usage.db
+db_path = "/home/master/.local/share/ai-proxy/usage.db"
+upstream_base_url = "https://api.commandcode.ai/provider/v1"
+upstream_api_key = "replace-me"
+
+[[models]]
+id = "deepseek/deepseek-v4.1-flash"
