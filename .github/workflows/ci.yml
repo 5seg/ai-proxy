@@ -20,7 +20,7 @@ jobs:
           - x86_64-unknown-linux-gnu
           - x86_64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # rusqlite is built with the bundled SQLite, so the C compiler has to be
       # present for the target. musl-tools provides musl-gcc.
@@ -52,7 +52,7 @@ jobs:
           sha256sum ai-proxy > ai-proxy.sha256
           cat ai-proxy.sha256
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: ai-proxy-${{ matrix.target }}
           path: |
