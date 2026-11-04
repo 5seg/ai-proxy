@@ -72,17 +72,18 @@ impl SseUsageScanner {
         }
     }
 
+    /// Byte index of the next newline at or after `from`.
+    fn line_end(&self, from: usize) -> Option<usize> {
+        self.buffer[from..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|offset| from + offset)
+    }
+
     pub fn feed(&mut self, chunk: &[u8]) {
         self.buffer.extend_from_slice(chunk);
         let mut consumed = 0;
-        loop {
-            let Some(offset) = self.buffer[consumed..]
-                .iter()
-                .position(|byte| *byte == b'\n')
-            else {
-                break;
-            };
-            let end = consumed + offset;
+        while let Some(end) = self.line_end(consumed) {
             if let Some(usage) = parse_line(&self.buffer[consumed..end]) {
                 self.usage = Some(usage);
             }

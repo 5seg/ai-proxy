@@ -2,12 +2,14 @@
 
 DESIGN.md の決定を前提に、作業を分割したもの。金額と料金表は commandcode のカタログ実測値に基づく。
 
+> フェーズ 0〜10 は実装・実測済み。運用の入口は README.md。
+
 ## 1. 確定事項(今回の追加分を含む)
 
 | 項目 | 決定 |
 | --- | --- |
 | 上流 | `https://api.commandcode.ai/provider/v1`(OpenAI 互換) |
-| 許可モデル | `deepseek/deepseek-v4.1-flash` のみ。`-fast` は不許可 |
+| 許可モデル | `deepseek/deepseek-v4.1-flash` のみ。`-fast` は不許可(キー単位で `--all-models` を付ければ制限なし) |
 | 対応 API | `/chat/completions`、`/responses`(上流は両方に対応) |
 | `/v1/models` | 1件だけ返す |
 | client_ip | 残す。調査用に TUI と report から見える |
@@ -184,6 +186,8 @@ src/tui.rs             ratatui 画面
 ## 6. 実装フェーズ
 
 各フェーズは「動作確認できる状態」で終える。
+
+進捗: フェーズ 0〜9 完了。フェーズ 10 は unit と手順を `deploy/` に置いたところまで(実機2台での運用確認は未了)。
 
 ### フェーズ 0: 骨組み(1〜2時間)
 config、tracing、DB 初期化、`/healthz`、clap サブコマンド。

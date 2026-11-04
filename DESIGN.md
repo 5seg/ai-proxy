@@ -34,12 +34,34 @@
 ```
 ai-proxy serve           # プロキシ本体
 ai-proxy tui             # 閲覧 TUI
-ai-proxy key add|list|revoke
-ai-proxy db prune        # 30日より古い行を削除
-ai-proxy export [--csv]
+ai-proxy report          # テキスト集計(--csv あり)
+ai-proxy config          # 実効設定と、その出所(env/file/default)
+ai-proxy key add|list|update|revoke|capture
+ai-proxy db prune        # 保持期間を超えた行を削除
+ai-proxy db rollup       # 日次集計を作る
 ```
 
-`serve` と `tui` は同じ DB を開く。書き込みは `serve` だけが行い、`tui` は読み取り専用で開く。SQLite は WAL モードにして `busy_timeout` を設定する。
+`serve` と `tui` は同じ DB を開く。書き込みは `serve` だけが行い、`tui` と `report` は SELECT しか発行しない。SQLite は WAL モードにして `busy_timeout` を設定する。
+
+## 3.1 設定
+
+設定ファイルは TOML で、値はすべて `AI_PROXY_*` 環境変数で上書きできる。設定ファイル自体を置かなくても、既定値と環境変数だけで動く(systemd 向け)。
+
+| 設定 | 環境変数 | 既定値 |
+| --- | --- | --- |
+| `listen` | `AI_PROXY_LISTEN` | `0.0.0.0:8787` |
+| `db_path` | `AI_PROXY_DB_PATH` | `$HOME/.local/share/ai-proxy/usage.db` |
+| `upstream_base_url` | `AI_PROXY_UPSTREAM_BASE_URL` | `https://api.commandcode.ai/provider/v1` |
+| `upstream_api_key` | `AI_PROXY_UPSTREAM_API_KEY` | 空(`serve` では必須) |
+| `models` | `AI_PROXY_MODELS` | `deepseek/deepseek-v4.1-flash` |
+| `retention_days` | `AI_PROXY_RETENTION_DAYS` | 30 |
+| `capture_ttl_hours` | `AI_PROXY_CAPTURE_TTL_HOURS` | 24 |
+| `capture_max_bytes` | `AI_PROXY_CAPTURE_MAX_BYTES` | 65536 |
+| `max_body_bytes` | `AI_PROXY_MAX_BODY_BYTES` | 67108864 |
+| `connect_timeout_secs` | `AI_PROXY_CONNECT_TIMEOUT_SECS` | 10 |
+| `read_timeout_secs` | `AI_PROXY_READ_TIMEOUT_SECS` | 300 |
+
+環境変数はファイルより優先する。`AI_PROXY_MODELS` は許可リストを丸ごと置換する。どの値がどこから来たかは `ai-proxy config` が出す。
 
 ## 4. 認証とキー
 
@@ -96,9 +118,29 @@ rate = cached_input / (input + cached_input + cache_write)
 
 分母にキャッシュ書き込みを含めるのは、Anthropic 系のプロバイダが `input_tokens` にキャッシュ分を含めないためである。この定義を TUI の画面に1行で表示する。command-code では `prompt_tokens` がキャッシュ分を含むことを実測で確認済みで、コスト計算では差し引く。
 
+## 4.1 キーの種類
+
+キーは2種類ある。既定は制限付き。
+
+- 制限付き: 許可モデル以外は 403、月次上限を超えると 429。
+- 無制限: `--all-models` でモデル許可リストを外し、`--limit` を付けなければ上限も無い。信頼する開発機に渡すキー向け。
+
+上限は million 単位で書ける。`--limit 100M` は 100,000,000。接尾辞は `k`(千)・`m`(百万)・`b`/`g`(十億)、`_` 区切りも受け付ける。`--limit unlimited` で上限を外す。
+
+```bash
+ai-proxy key add --device laptop --limit 100M        # 制限付き、月1億トークン
+ai-proxy key add --device workstation --all-models   # モデル制限なし、上限なし
+ai-proxy key update 3MS4P2J3 --limit unlimited       # 後から外す
+ai-proxy key update 3MS4P2J3 --all-models --limit 500M
+```
+
+無制限キーは `flash-fast` も通す。「flash-fast を許可しない」は許可リストの運用で守る。無制限キーにも効く拒否リストは実装していない。
+
+`allow_all_models` は schema v2 で追加した。既存 DB は起動時に `ALTER TABLE` で移行し、既存キーは制限付きになる。
+
 ## 6. クォータ
 
-キーごとに月次トークン上限を持つ。判定は受付時と完了時の2回行う。
+キーごとに月次トークン上限を持つ。`monthly_token_limit` が NULL なら上限なしで、判定自体を飛ばす。判定は受付時と完了時の2回行う。
 
 - 受付時: 当月合計が上限以上であれば 429 を返す。`Retry-After` は月初まで。
 - 実行中: 打ち切らない。最後まで流し、次回の受付で拒否する。打ち切ると usage が取れず、クライアントには中途半端な応答が渡るためである。
@@ -112,7 +154,9 @@ rate = cached_input / (input + cached_input + cache_write)
 
 ```sql
 device(id, name, note, created_at)
-api_key(id, device_id, key_hash, prefix, created_at, revoked_at, monthly_token_limit)
+api_key(id, device_id, key_hash, prefix, created_at, revoked_at, monthly_token_limit,
+        allow_all_models, quota_weight_input, quota_weight_cached, quota_weight_output,
+        capture_bodies, capture_until)
 request(id, ts, device_id, api_key_id, client_ip, endpoint, model, stream,
         status_code, latency_ms, ttft_ms,
         input_tokens, cached_input_tokens, cache_write_tokens,
@@ -127,22 +171,25 @@ debug_capture(request_id, api_key_id, expires_at, prompt_body, response_body)
 
 - `request` は受付時に `in_progress` 相当の行を作り、完了時に更新する。クラッシュ時の取りこぼし防止と、実行中リクエストの TUI 表示の両方を満たすためである。
 - `prompt_hash` は先頭4KBの BLAKE3。`message_count`、`prompt_chars`、`has_tools`、`has_image` と合わせて、コスト差の説明に使う。
-- 本文は既定で保存しない。`debug_capture` はキー単位で有効化し、24時間で消す。1件64KBで切る。プロンプトだけでは原因が分からないことが多いため、応答本文も一緒に保存する。
+- 本文は既定で保存しない。`debug_capture` はキー単位で有効化し、`capture_ttl_hours`(既定24時間)で消す。1件 `capture_max_bytes`(既定64KB)で切り、切ったら `truncated=1`。プロンプトだけでは原因が分からないことが多いため、応答本文も一緒に保存する。ストリーミングの応答は流したバイト列を連結したもので、SSE のまま入る。
+- キーの `capture_until` は本文保存の有効期限である。期限を過ぎたキーは `capture_bodies=0` に戻す(`db prune` と起動時)。
 - `price` は計算済みの金額を保存しないための表であり、金額はクエリ時に再計算する。
 - 30日より古い `request` 行は `db prune` で削除する。`daily_rollup` は残す。
 - DELETE してもファイルは縮まないため、`auto_vacuum = INCREMENTAL` にして `db prune` のあとに `incremental_vacuum` を実行する。
 
 ## 8. TUI
 
-閲覧専用で、書き込みはしない。画面は次の5つ。
+床面専用で、書き込みはしない。画面は次の5つ。
 
-- 端末×期間: 端末ごとのトークン数、リクエスト数、キャッシュヒット率
-- モデル別: モデルごとの内訳
-- 日次推移: 日ごとの棒グラフ
-- 上位リクエスト: 消費の大きいリクエスト
-- 状態: usage 不明率、エラー率、最終書き込み時刻
+- 概要: 合計(リクエスト数、入力、キャッシュヒット率、出力、金額、キャッシュ節約額)と日次表
+- 端末: 端末ごとのトークン数、リクエスト数、キャッシュヒット率、金額
+- IP: client_ip ごとの同じ列
+- モデル: モデルごとの内訳
+- キー: キー prefix ごとの内訳
 
-更新は1秒間隔のポーリングで行う。キー操作は期間の切り替え(今日/7日/30日)とソートのみ。
+列は共通で `reqs / input / cached / hit / output / cost(USD)`、最終行に合計を置く。期間は `retention_days`。
+
+更新は2秒間隔の取り直しで行う。キー操作は `q` 終了、`1`〜`5` または `Tab` で画面切替、`j`/`k` と `PageUp`/`PageDown` でスクロール、`r` で再読み込み。端末の復元は Drop で行い、エラーは画面内に出してパニックさせない。
 
 ## 9. バイナリと依存
 
@@ -162,12 +209,13 @@ debug_capture(request_id, api_key_id, expires_at, prompt_body, response_body)
 
 ## 11. 実装順序
 
-1. 設定の読み込みと `/healthz`、`/v1/models`
-2. `/v1/chat/completions` のパススルーと usage 記録(非ストリーム)
-3. ストリーミングのパススルーと usage チャンクの除去
-4. `/v1/responses` の対応
-5. キー発行 CLI とモデル制限
-6. クォータ判定
-7. TUI
-8. 保持と prune
-9. デバッグキャプチャ
+1. 設定の読み込みと `/healthz`、`/v1/models` — 完了
+2. `/v1/chat/completions` のパススルーと usage 記録(非ストリーム) — 完了
+3. ストリーミングのパススルーと usage チャンクの除去 — 完了
+4. `/v1/responses` の対応 — 完了
+5. キー発行 CLI とモデル制限 — 完了
+6. クォータ判定 — 完了
+7. 集計(`report`)と TUI — 完了
+8. 保持と prune、日次ロールアップ — 完了
+9. デバッグキャプチャ — 完了
+10. systemd unit と実機投入 — unit と手順は `deploy/` に置いた。実機2台での運用確認は未了

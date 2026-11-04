@@ -1,2 +1,5 @@
 /target
 /ai-proxy.toml
+*.db
+*.db-wal
+*.db-shm

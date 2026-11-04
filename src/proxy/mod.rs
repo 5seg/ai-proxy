@@ -25,6 +25,7 @@ pub struct AppState {
 }
 
 pub fn router(config: Config, conn: Connection, client: reqwest::Client) -> Router {
+    let max_body_bytes = config.max_body_bytes;
     let state = AppState {
         config: Arc::new(config),
         db: Arc::new(Mutex::new(conn)),
@@ -45,7 +46,7 @@ pub fn router(config: Config, conn: Connection, client: reqwest::Client) -> Rout
             state.clone(),
             auth::require_auth,
         ))
-        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(max_body_bytes))
         .layer(middleware::from_fn(log_requests))
         .with_state(state)
 }
@@ -82,7 +83,7 @@ impl ApiError {
     pub fn model_not_found(model: &str) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            code: "model_not_allowed",
+            code: "model_not_found",
             message: format!("model `{model}` is not found"),
             www_authenticate: false,
             retry_after: None,

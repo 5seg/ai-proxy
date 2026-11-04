@@ -1,5 +1,7 @@
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -98,9 +100,18 @@ async fn relay(
         }
     };
 
-    let mut guard = RequestGuard::new(state.clone(), request_id, started);
+    let mut guard = RequestGuard::new(
+        state.clone(),
+        request_id,
+        auth.api_key_id,
+        state.config.capture_ttl_hours * 3_600_000,
+        started,
+    );
+    if auth.capture_bodies {
+        guard.capture = Some(Captured::new(state.config.capture_max_bytes, &body));
+    }
 
-    if !auth::is_model_allowed(&state.config, model) {
+    if !auth.allow_all_models && !auth::is_model_allowed(&state.config, model) {
         guard.status_code = Some(StatusCode::FORBIDDEN.as_u16() as i64);
         guard.finish(Some("model_denied"), None, false);
         return ApiError::model_not_allowed(model).into_response();
@@ -180,6 +191,7 @@ async fn relay(
             }
         };
         guard.mark_ttft();
+        guard.push_capture(&bytes);
         let usage = serde_json::from_slice::<Value>(&bytes)
             .ok()
             .and_then(|value| usage::extract(&value));
@@ -301,6 +313,56 @@ fn is_image_part(part: &Value) -> bool {
     )
 }
 
+struct Captured {
+    prompt: String,
+    response: Arc<Mutex<Vec<u8>>>,
+    max: usize,
+    truncated: Arc<AtomicBool>,
+}
+
+impl Captured {
+    fn new(max: usize, body: &Bytes) -> Self {
+        let mut prompt = String::from_utf8_lossy(&body[..body.len().min(max)]).into_owned();
+        let clipped = body.len() > max;
+        if clipped {
+            prompt.push_str("\n[truncated]");
+        }
+        Self {
+            prompt,
+            response: Arc::new(Mutex::new(Vec::new())),
+            max,
+            truncated: Arc::new(AtomicBool::new(clipped)),
+        }
+    }
+
+    fn push(&self, chunk: &[u8]) {
+        let Ok(mut buffer) = self.response.lock() else {
+            return;
+        };
+        if buffer.len() >= self.max {
+            self.truncated.store(true, Ordering::Relaxed);
+            return;
+        }
+        let room = self.max - buffer.len();
+        if chunk.len() > room {
+            self.truncated.store(true, Ordering::Relaxed);
+        }
+        buffer.extend_from_slice(&chunk[..chunk.len().min(room)]);
+    }
+
+    fn truncated(&self) -> bool {
+        self.truncated.load(Ordering::Relaxed)
+    }
+
+    fn response_text(&self) -> Option<String> {
+        let buffer = self.response.lock().ok()?;
+        if buffer.is_empty() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&buffer).into_owned())
+    }
+}
+
 struct StreamRelay {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     scanner: SseUsageScanner,
@@ -324,6 +386,7 @@ impl Stream for StreamRelay {
         match this.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(chunk))) => {
                 this.guard.mark_ttft();
+                this.guard.push_capture(&chunk);
                 this.scanner.feed(&chunk);
                 Poll::Ready(Some(Ok(chunk)))
             }
@@ -357,25 +420,43 @@ struct QuotaBudget {
 struct RequestGuard {
     state: AppState,
     id: i64,
+    api_key_id: i64,
+    capture_ttl_ms: i64,
     started: Instant,
     status_code: Option<i64>,
     ttft_ms: Option<i64>,
     quota: Option<QuotaBudget>,
     quota_exceeded: bool,
+    capture: Option<Captured>,
     finished: bool,
 }
 
 impl RequestGuard {
-    fn new(state: AppState, id: i64, started: Instant) -> Self {
+    fn new(
+        state: AppState,
+        id: i64,
+        api_key_id: i64,
+        capture_ttl_ms: i64,
+        started: Instant,
+    ) -> Self {
         Self {
             state,
             id,
+            api_key_id,
+            capture_ttl_ms,
             started,
             status_code: None,
             ttft_ms: None,
             quota: None,
             quota_exceeded: false,
+            capture: None,
             finished: false,
+        }
+    }
+
+    fn push_capture(&self, chunk: &[u8]) {
+        if let Some(capture) = &self.capture {
+            capture.push(chunk);
         }
     }
 
@@ -403,17 +484,34 @@ impl RequestGuard {
                 budget.used_before + usage.input_tokens + usage.output_tokens > budget.limit;
         }
         let latency_ms = self.started.elapsed().as_millis() as i64;
+        let now = crate::now_ms();
+        if let Some(capture) = &self.capture {
+            let response = capture.response_text();
+            if let Err(err) = db::insert_capture(
+                &conn,
+                self.id,
+                self.api_key_id,
+                now + self.capture_ttl_ms,
+                capture.truncated(),
+                Some(&capture.prompt),
+                response.as_deref(),
+            ) {
+                tracing::error!(error = %err, "failed to store capture");
+            }
+        }
         if let Err(err) = db::finish_request(
             &conn,
-            self.id,
-            crate::now_ms(),
-            self.status_code,
-            Some(latency_ms),
-            self.ttft_ms,
-            usage,
-            error_kind,
-            aborted,
-            quota_exceeded,
+            db::FinishRequest {
+                id: self.id,
+                finished_at: now,
+                status_code: self.status_code,
+                latency_ms: Some(latency_ms),
+                ttft_ms: self.ttft_ms,
+                usage,
+                error_kind,
+                aborted,
+                quota_exceeded,
+            },
         ) {
             tracing::error!(error = %err, "failed to update request row");
         }

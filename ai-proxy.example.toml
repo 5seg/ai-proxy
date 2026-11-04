@@ -1,8 +1,31 @@
 listen = "0.0.0.0:8787"
+
 # 絶対パスで書く。~ は展開しない。省略時は $HOME/.local/share/ai-proxy/usage.db
 db_path = "/home/master/.local/share/ai-proxy/usage.db"
+
 upstream_base_url = "https://api.commandcode.ai/provider/v1"
 upstream_api_key = "replace-me"
 
+# 許可するモデル。ここに無いモデルは 403 で拒否する。
 [[models]]
 id = "deepseek/deepseek-v4.1-flash"
+
+# --- 以下は省略可。既定値を書いてある ---
+
+# 古い request 行を消すまでの日数
+# retention_days = 30
+
+# 本文保存(--capture)を切るまでの時間と、1件あたりの上限
+# capture_ttl_hours = 24
+# capture_max_bytes = 65536
+
+# 受けるリクエスト本文の上限(1M コンテキストを想定)
+# max_body_bytes = 67108864
+
+# 上流への接続・読み取りのタイムアウト
+# connect_timeout_secs = 10
+# read_timeout_secs = 300
+
+# 環境変数 AI_PROXY_* はこのファイルより優先する。
+#   AI_PROXY_UPSTREAM_API_KEY はファイルに書きたくないときに使う。
+#   AI_PROXY_MODELS="a/b,c/d" は models を丸ごと置き換える。

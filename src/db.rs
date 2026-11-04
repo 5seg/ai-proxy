@@ -11,6 +11,8 @@ pub struct KeyAuth {
     pub id: i64,
     pub device_id: i64,
     pub monthly_token_limit: Option<i64>,
+    pub allow_all_models: bool,
+    pub capture_bodies: bool,
     pub revoked: bool,
 }
 
@@ -38,6 +40,8 @@ pub struct KeyListRow {
     pub created_at: i64,
     pub revoked_at: Option<i64>,
     pub monthly_token_limit: Option<i64>,
+    pub allow_all_models: bool,
+    pub capture_until: Option<i64>,
 }
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -68,11 +72,14 @@ pub fn open(path: &Path) -> Result<Connection> {
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version >= 1 {
-        return Ok(());
+    let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version < 1 {
+        conn.execute_batch(MIGRATION_V1)?;
+        version = 1;
     }
-    conn.execute_batch(MIGRATION_V1)?;
+    if version < 2 {
+        conn.execute_batch(MIGRATION_V2)?;
+    }
     Ok(())
 }
 
@@ -93,31 +100,39 @@ pub fn ensure_device(
     Ok(id)
 }
 
-pub fn insert_api_key(
-    conn: &Connection,
-    device_id: i64,
-    hash: &[u8; 32],
-    prefix: &str,
-    now: i64,
-    limit: Option<i64>,
-    capture: bool,
-) -> Result<i64> {
-    let capture_bodies = if capture { 1 } else { 0 };
-    let capture_until = if capture {
-        Some(now + 24 * 60 * 60 * 1000)
-    } else {
-        None
-    };
+pub struct NewApiKey<'a> {
+    pub device_id: i64,
+    pub hash: &'a [u8; 32],
+    pub prefix: &'a str,
+    pub created_at: i64,
+    pub monthly_token_limit: Option<i64>,
+    pub allow_all_models: bool,
+    pub capture_until: Option<i64>,
+}
+
+pub fn insert_api_key(conn: &Connection, key: NewApiKey<'_>) -> Result<i64> {
+    let NewApiKey {
+        device_id,
+        hash,
+        prefix,
+        created_at,
+        monthly_token_limit,
+        allow_all_models,
+        capture_until,
+    } = key;
+    let capture_bodies = if capture_until.is_some() { 1 } else { 0 };
     conn.execute(
         "INSERT INTO api_key
-         (device_id, key_hash, prefix, created_at, monthly_token_limit, capture_bodies, capture_until)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+         (device_id, key_hash, prefix, created_at, monthly_token_limit, allow_all_models,
+          capture_bodies, capture_until)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             device_id,
             hash.as_slice(),
             prefix,
-            now,
-            limit,
+            created_at,
+            monthly_token_limit,
+            allow_all_models as i64,
             capture_bodies,
             capture_until
         ],
@@ -127,7 +142,8 @@ pub fn insert_api_key(
 
 pub fn list_keys(conn: &Connection) -> Result<Vec<KeyListRow>> {
     let mut stmt = conn.prepare(
-        "SELECT k.id, d.name, k.prefix, k.created_at, k.revoked_at, k.monthly_token_limit
+        "SELECT k.id, d.name, k.prefix, k.created_at, k.revoked_at, k.monthly_token_limit,
+                k.allow_all_models, k.capture_until
          FROM api_key k
          JOIN device d ON d.id = k.device_id
          ORDER BY k.id",
@@ -140,6 +156,8 @@ pub fn list_keys(conn: &Connection) -> Result<Vec<KeyListRow>> {
             created_at: row.get(3)?,
             revoked_at: row.get(4)?,
             monthly_token_limit: row.get(5)?,
+            allow_all_models: row.get::<_, i64>(6)? != 0,
+            capture_until: row.get(7)?,
         })
     })?;
 
@@ -160,8 +178,11 @@ pub fn revoke_keys(conn: &Connection, prefix: &str, now: i64) -> Result<usize> {
 }
 
 pub fn find_key(conn: &Connection, hash: &[u8; 32]) -> Result<Option<KeyAuth>> {
-    let mut stmt =
-        conn.prepare("SELECT id, device_id, key_hash, revoked_at, monthly_token_limit FROM api_key")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, device_id, key_hash, revoked_at, monthly_token_limit, capture_bodies,
+                allow_all_models
+         FROM api_key",
+    )?;
     let mut rows = stmt.query([])?;
     let mut found = None;
     while let Some(row) = rows.next()? {
@@ -172,6 +193,8 @@ pub fn find_key(conn: &Connection, hash: &[u8; 32]) -> Result<Option<KeyAuth>> {
                 id: row.get(0)?,
                 device_id: row.get(1)?,
                 monthly_token_limit: row.get(4)?,
+                capture_bodies: row.get::<_, i64>(5)? != 0,
+                allow_all_models: row.get::<_, i64>(6)? != 0,
                 revoked: revoked_at.is_some(),
             });
         }
@@ -206,6 +229,126 @@ pub fn insert_request(conn: &Connection, request: &NewRequest<'_>) -> Result<i64
     Ok(conn.last_insert_rowid())
 }
 
+pub fn set_capture(conn: &Connection, prefix: &str, until: Option<i64>) -> Result<usize> {
+    let changed = conn.execute(
+        "UPDATE api_key SET capture_bodies = ?1, capture_until = ?2
+         WHERE substr(prefix, 1, length(?3)) = ?3",
+        params![if until.is_some() { 1 } else { 0 }, until, prefix],
+    )?;
+    Ok(changed)
+}
+
+/// `limit`: `Some(None)` clears the cap, `Some(Some(n))` sets it, `None` leaves it alone.
+pub fn set_key_settings(
+    conn: &Connection,
+    prefix: &str,
+    limit: Option<Option<i64>>,
+    allow_all_models: Option<bool>,
+) -> Result<usize> {
+    if let Some(limit) = limit {
+        conn.execute(
+            "UPDATE api_key SET monthly_token_limit = ?1
+             WHERE substr(prefix, 1, length(?2)) = ?2",
+            params![limit, prefix],
+        )?;
+    }
+    if let Some(allow) = allow_all_models {
+        conn.execute(
+            "UPDATE api_key SET allow_all_models = ?1
+             WHERE substr(prefix, 1, length(?2)) = ?2",
+            params![allow as i64, prefix],
+        )?;
+    }
+    let changed: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM api_key WHERE substr(prefix, 1, length(?1)) = ?1",
+        [prefix],
+        |row| row.get(0),
+    )?;
+    Ok(changed as usize)
+}
+
+pub fn insert_capture(
+    conn: &Connection,
+    request_id: i64,
+    api_key_id: i64,
+    expires_at: i64,
+    truncated: bool,
+    prompt_body: Option<&str>,
+    response_body: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO debug_capture
+         (request_id, api_key_id, expires_at, truncated, prompt_body, response_body)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            request_id,
+            api_key_id,
+            expires_at,
+            if truncated { 1 } else { 0 },
+            prompt_body,
+            response_body
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn prune_requests(conn: &Connection, older_than: i64) -> Result<usize> {
+    let captures = conn.execute(
+        "DELETE FROM debug_capture WHERE request_id IN
+         (SELECT id FROM request WHERE started_at < ?1)",
+        params![older_than],
+    )?;
+    let requests = conn.execute("DELETE FROM request WHERE started_at < ?1", params![older_than])?;
+    Ok(requests + captures)
+}
+
+pub fn prune_captures(conn: &Connection, now: i64) -> Result<usize> {
+    let expired = conn.execute(
+        "DELETE FROM debug_capture WHERE expires_at < ?1",
+        params![now],
+    )?;
+    let cleared = conn.execute(
+        "UPDATE api_key SET capture_bodies = 0, capture_until = NULL
+         WHERE capture_bodies = 1 AND capture_until IS NOT NULL AND capture_until < ?1",
+        params![now],
+    )?;
+    Ok(expired + cleared)
+}
+
+pub fn rollup_day(conn: &Connection, day: &str) -> Result<usize> {
+    let inserted = conn.execute(
+        "INSERT OR REPLACE INTO daily_rollup
+         (day, device_id, model, requests, input_tokens, cached_input_tokens,
+          cache_write_tokens, output_tokens, reasoning_tokens)
+         SELECT ?1, device_id, model, COUNT(*),
+                COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(cached_input_tokens), 0),
+                COALESCE(SUM(cache_write_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(reasoning_tokens), 0)
+         FROM request
+         WHERE date(started_at / 1000, 'unixepoch') = ?1
+         GROUP BY device_id, model",
+        params![day],
+    )?;
+    Ok(inserted)
+}
+
+pub fn rollup_range(conn: &Connection, since: i64) -> Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT date(started_at / 1000, 'unixepoch') FROM request
+         WHERE started_at >= ?1 ORDER BY 1",
+    )?;
+    let days: Vec<String> = stmt
+        .query_map(params![since], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut total = 0;
+    for day in days {
+        total += rollup_day(conn, &day)?;
+    }
+    Ok(total)
+}
+
 pub fn month_tokens_used(conn: &Connection, api_key_id: i64, since: i64) -> Result<i64> {
     let total: i64 = conn.query_row(
         "SELECT COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)
@@ -216,18 +359,30 @@ pub fn month_tokens_used(conn: &Connection, api_key_id: i64, since: i64) -> Resu
     Ok(total)
 }
 
-pub fn finish_request(
-    conn: &Connection,
-    id: i64,
-    finished_at: i64,
-    status_code: Option<i64>,
-    latency_ms: Option<i64>,
-    ttft_ms: Option<i64>,
-    usage: Option<&Usage>,
-    error_kind: Option<&str>,
-    aborted: bool,
-    quota_exceeded: bool,
-) -> Result<()> {
+pub struct FinishRequest<'a> {
+    pub id: i64,
+    pub finished_at: i64,
+    pub status_code: Option<i64>,
+    pub latency_ms: Option<i64>,
+    pub ttft_ms: Option<i64>,
+    pub usage: Option<&'a Usage>,
+    pub error_kind: Option<&'a str>,
+    pub aborted: bool,
+    pub quota_exceeded: bool,
+}
+
+pub fn finish_request(conn: &Connection, request: FinishRequest<'_>) -> Result<()> {
+    let FinishRequest {
+        id,
+        finished_at,
+        status_code,
+        latency_ms,
+        ttft_ms,
+        usage,
+        error_kind,
+        aborted,
+        quota_exceeded,
+    } = request;
     let (source, input, cached, cache_write, output, reasoning) = match usage {
         Some(usage) => (
             "upstream",
@@ -365,3 +520,9 @@ PRAGMA user_version = 1;
 
 COMMIT;
 "#;
+
+/// Version 2 adds a per-key switch that lifts the model allowlist.
+const MIGRATION_V2: &str = "
+ALTER TABLE api_key ADD COLUMN allow_all_models INTEGER NOT NULL DEFAULT 0;
+PRAGMA user_version = 2;
+";

@@ -13,6 +13,8 @@ pub struct AuthContext {
     pub api_key_id: i64,
     pub device_id: i64,
     pub monthly_token_limit: Option<i64>,
+    pub allow_all_models: bool,
+    pub capture_bodies: bool,
 }
 
 pub async fn require_auth(
@@ -29,6 +31,8 @@ pub async fn require_auth(
         api_key_id: auth.id,
         device_id: auth.device_id,
         monthly_token_limit: auth.monthly_token_limit,
+        allow_all_models: auth.allow_all_models,
+        capture_bodies: auth.capture_bodies,
     });
     Ok(next.run(request).await)
 }
