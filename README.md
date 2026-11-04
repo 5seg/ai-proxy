@@ -28,6 +28,26 @@ rustup も入っておらず、`x86_64-unknown-linux-musl` ターゲットを追
 静的バイナリが要るときは、rustup のあるマシンで `rustup target add x86_64-unknown-linux-musl`
 してから `cargo build --release --target x86_64-unknown-linux-musl` する。
 
+## CI
+
+`.github/workflows/ci.yml` が `main` への push、PR、手動実行で以下をビルドし、成果物を
+Actions に添付する(30日保存)。
+
+| 成果物 | 中身 |
+| --- | --- |
+| `ai-proxy-x86_64-unknown-linux-musl` | `static-pie linked` の完全静的バイナリ。glibc でも Alpine でも動く |
+| `ai-proxy-x86_64-unknown-linux-gnu` | glibc 向け。動的リンク |
+
+各成果物には `ai-proxy` と `ai-proxy.sha256` が入る。取り方は2通り。
+
+```bash
+gh run list --limit 1
+timeout 120 gh run download <run-id> -n ai-proxy-x86_64-unknown-linux-musl -D ./dist
+gh release download  # タグを打っていればこちら
+```
+
+手元のこのマシンで静的ビルドができないので、配布用バイナリは CI の musl 成果物を正とする。
+
 ## 起動
 
 ```bash
