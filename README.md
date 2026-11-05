@@ -163,20 +163,21 @@ ai-proxy db rollup && ai-proxy db prune   # 集計してから消す
 - 1件 `capture_max_bytes` で切り、切ったら `truncated=1`。
 - ストリーミングの応答は流したバイト列を連結して保存する(SSE のまま)。
 
-## systemd
+## 配置
 
 ```bash
-sudo install -m755 target/release/ai-proxy /usr/local/bin/ai-proxy
+sudo install -m755 ai-proxy /usr/local/bin/ai-proxy
 sudo install -d -m750 /etc/ai-proxy
-sudo cp deploy/ai-proxy.service /etc/systemd/system/
 sudo cp deploy/env.example /etc/ai-proxy/env && sudo chmod 600 /etc/ai-proxy/env
 $EDITOR /etc/ai-proxy/env          # AI_PROXY_UPSTREAM_API_KEY を書く
-sudo systemctl daemon-reload && sudo systemctl enable --now ai-proxy
-journalctl -u ai-proxy -f
 ```
 
-unit は `StateDirectory=ai-proxy` を使い、DB を `/var/lib/ai-proxy/usage.db` に置く。
-`--config` を渡さないので、設定はすべて環境変数から来る。
+起動方法はホストの init に任せる(unit は同梱しない)。DB は `db_path` か
+`AI_PROXY_DB_PATH` が指す場所に作るので、サービスユーザが書けるディレクトリを用意すること。
+ログをファイルに出す場合、プロセスはサービスユーザに降格してから書き込むので、
+ログファイルの所有者もそのユーザにしておく。
+
+unit に設定を置かない前提なので、`--config` 無しでも環境変数だけで起動できる。
 
 ## エンドポイント
 

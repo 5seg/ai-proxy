@@ -222,4 +222,5 @@ debug_capture(request_id, api_key_id, expires_at, prompt_body, response_body)
 7. 集計(`report`)と TUI — 完了
 8. 保持と prune、日次ロールアップ — 完了
 9. デバッグキャプチャ — 完了
-10. systemd unit と実機投入 — unit と手順は `deploy/` に置いた。実機2台での運用確認は未了
+10. 実機投入 — unit は同梱しない(設定は環境変数だけで完結する)。Alpine の OpenRC で稼働中。
+    下流マシン2台での運用確認は未了
