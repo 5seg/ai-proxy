@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -48,6 +48,42 @@ pub async fn responses(
     relay(state.0, addr, auth, headers, body, "responses", "/responses").await
 }
 
+/// 手前のプロキシが `trusted_proxies` にいる場合だけ、ヘッダから実クライアントの IP を採る。
+/// nginx は CF の `CF-Connecting-IP` を `real_ip` で解決済みの `$remote_addr` を
+/// `X-Real-IP` に入れるので、まずそれを見て、無ければ `X-Forwarded-For` の先頭。
+fn client_ip(peer: SocketAddr, headers: &HeaderMap, trusted: &[String]) -> String {
+    let peer_ip = peer.ip();
+    let trusted_peer = trusted
+        .iter()
+        .filter_map(|entry| entry.parse::<IpAddr>().ok())
+        .any(|ip| normalize(ip) == normalize(peer_ip));
+
+    if trusted_peer {
+        for name in ["x-real-ip", "x-forwarded-for"] {
+            let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) else {
+                continue;
+            };
+            let candidate = value.split(',').next().unwrap_or("").trim();
+            if let Ok(ip) = candidate.parse::<IpAddr>() {
+                return normalize(ip).to_string();
+            }
+        }
+    }
+
+    normalize(peer_ip).to_string()
+}
+
+/// `::ffff:127.0.0.1` と `127.0.0.1` を同じものとして扱う。
+fn normalize(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        ip => ip,
+    }
+}
+
 async fn relay(
     state: AppState,
     addr: SocketAddr,
@@ -68,7 +104,7 @@ async fn relay(
     let meta = RequestMeta::from_payload(&payload);
 
     let started = Instant::now();
-    let client_ip = addr.ip().to_string();
+    let client_ip = client_ip(addr, &headers, &state.config.trusted_proxies);
     let prompt_hash = *blake3::hash(&body[..body.len().min(PROMPT_HASH_LIMIT)]).as_bytes();
     let request_id = {
         let conn = match state.db.lock() {

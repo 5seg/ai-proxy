@@ -33,6 +33,10 @@ pub struct Config {
     pub read_timeout_secs: u64,
     #[serde(default = "default_models_ttl_secs")]
     pub models_ttl_secs: u64,
+    /// この IP から来たリクエストだけ X-Real-IP / X-Forwarded-For を信じる。
+    /// nginx などの手前のプロキシを並べる。
+    #[serde(default = "default_trusted_proxies")]
+    pub trusted_proxies: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +89,7 @@ fn load(path: &Path) -> Result<(Config, Vec<Setting>)> {
             connect_timeout_secs: default_connect_timeout_secs(),
             read_timeout_secs: default_read_timeout_secs(),
             models_ttl_secs: default_models_ttl_secs(),
+            trusted_proxies: default_trusted_proxies(),
         },
     };
 
@@ -177,6 +182,12 @@ fn load(path: &Path) -> Result<(Config, Vec<Setting>)> {
         in_file("models_ttl_secs"),
         &mut sources,
     )?;
+    if let Some(value) = env_parse::<String>("AI_PROXY_TRUSTED_PROXIES")? {
+        config.trusted_proxies = split_list(&value);
+        sources.push(("trusted_proxies".to_string(), "env"));
+    } else if in_file("trusted_proxies") {
+        sources.push(("trusted_proxies".to_string(), "file"));
+    }
 
     if config.models.is_empty() {
         bail!("at least one model must be configured");
@@ -189,6 +200,11 @@ fn load(path: &Path) -> Result<(Config, Vec<Setting>)> {
     }
     if config.max_body_bytes < 1024 {
         bail!("max_body_bytes must be at least 1024");
+    }
+    for proxy in &config.trusted_proxies {
+        if proxy.parse::<std::net::IpAddr>().is_err() {
+            bail!("trusted_proxies entry is not an IP address: {proxy}");
+        }
     }
 
     let settings = vec![
@@ -256,6 +272,11 @@ fn load(path: &Path) -> Result<(Config, Vec<Setting>)> {
             name: "models_ttl_secs".to_string(),
             value: config.models_ttl_secs.to_string(),
             source: source_of("models_ttl_secs", &sources),
+        },
+        Setting {
+            name: "trusted_proxies".to_string(),
+            value: config.trusted_proxies.join(","),
+            source: source_of("trusted_proxies", &sources),
         },
     ];
 
@@ -387,4 +408,17 @@ fn default_read_timeout_secs() -> u64 {
 
 fn default_models_ttl_secs() -> u64 {
     300
+}
+
+fn default_trusted_proxies() -> Vec<String> {
+    vec!["127.0.0.1".to_string(), "::1".to_string()]
+}
+
+fn split_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
 }

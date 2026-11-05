@@ -79,9 +79,14 @@ ai-proxy config --config ./ai-proxy.toml
 | `connect_timeout_secs` | `AI_PROXY_CONNECT_TIMEOUT_SECS` | `10` |
 | `read_timeout_secs` | `AI_PROXY_READ_TIMEOUT_SECS` | `300` |
 | `models_ttl_secs` | `AI_PROXY_MODELS_TTL_SECS` | `300`(0 でキャッシュしない) |
+| `trusted_proxies` | `AI_PROXY_TRUSTED_PROXIES` (カンマ区切り) | `127.0.0.1,::1` |
 
 環境変数は設定ファイルより優先する。`AI_PROXY_MODELS` を設定すると許可モデルが丸ごと置き換わる。
 `RUST_LOG` はそのまま効く(`RUST_LOG=ai_proxy=debug`)。
+
+`trusted_proxies` に入っている IP から来たリクエストだけ、`X-Real-IP` と
+`X-Forwarded-For` を信じて `client_ip` に採る。nginx などの手前のプロキシを並べる。
+直接来たリクエストのヘッダは無視するので、下流マシンが自己申告で IP を偽装することはできない。
 
 `models` に無いモデルは 403 `model_not_allowed` で拒否する。`deepseek-v4.1-flash-fast` は
 許可リストに入れない方針なので、既定にも含めていない。`--all-models` のキーだけはこの判定を
