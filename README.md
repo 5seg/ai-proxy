@@ -9,6 +9,9 @@ client (OpenAI SDK) → ai-proxy → 上流
                         └→ usage.db (request, daily_rollup, debug_capture)
 ```
 
+クライアント側の設定はエージェントに任せられる。[`prompts/`](prompts/) に、そのまま
+貼れる指示書がある(`opencode.md` と `pi.md`)。
+
 ## ビルド
 
 ```bash
