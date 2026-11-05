@@ -33,6 +33,9 @@ pub struct Config {
     pub read_timeout_secs: u64,
     #[serde(default = "default_models_ttl_secs")]
     pub models_ttl_secs: u64,
+    /// Monthly cap the key wizard recommends. `0` recommends no cap.
+    #[serde(default = "default_monthly_cap")]
+    pub default_monthly_cap: i64,
     /// この IP から来たリクエストだけ X-Real-IP / X-Forwarded-For を信じる。
     /// nginx などの手前のプロキシを並べる。
     #[serde(default = "default_trusted_proxies")]
@@ -89,6 +92,7 @@ fn load(path: &Path) -> Result<(Config, Vec<Setting>)> {
             connect_timeout_secs: default_connect_timeout_secs(),
             read_timeout_secs: default_read_timeout_secs(),
             models_ttl_secs: default_models_ttl_secs(),
+            default_monthly_cap: default_monthly_cap(),
             trusted_proxies: default_trusted_proxies(),
         },
     };
@@ -182,6 +186,13 @@ fn load(path: &Path) -> Result<(Config, Vec<Setting>)> {
         in_file("models_ttl_secs"),
         &mut sources,
     )?;
+    override_parsed(
+        &mut config.default_monthly_cap,
+        "DEFAULT_MONTHLY_CAP",
+        "default_monthly_cap",
+        in_file("default_monthly_cap"),
+        &mut sources,
+    )?;
     if let Some(value) = env_parse::<String>("AI_PROXY_TRUSTED_PROXIES")? {
         config.trusted_proxies = split_list(&value);
         sources.push(("trusted_proxies".to_string(), "env"));
@@ -272,6 +283,14 @@ fn load(path: &Path) -> Result<(Config, Vec<Setting>)> {
             name: "models_ttl_secs".to_string(),
             value: config.models_ttl_secs.to_string(),
             source: source_of("models_ttl_secs", &sources),
+        },
+        Setting {
+            name: "default_monthly_cap".to_string(),
+            value: match config.default_monthly_cap {
+                0 => "unlimited".to_string(),
+                value => value.to_string(),
+            },
+            source: source_of("default_monthly_cap", &sources),
         },
         Setting {
             name: "trusted_proxies".to_string(),
@@ -408,6 +427,10 @@ fn default_read_timeout_secs() -> u64 {
 
 fn default_models_ttl_secs() -> u64 {
     300
+}
+
+fn default_monthly_cap() -> i64 {
+    60_000_000
 }
 
 fn default_trusted_proxies() -> Vec<String> {

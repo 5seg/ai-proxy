@@ -80,6 +80,7 @@ ai-proxy config --config ./ai-proxy.toml
 | `read_timeout_secs` | `AI_PROXY_READ_TIMEOUT_SECS` | `300` |
 | `models_ttl_secs` | `AI_PROXY_MODELS_TTL_SECS` | `300`(0 でキャッシュしない) |
 | `trusted_proxies` | `AI_PROXY_TRUSTED_PROXIES` (カンマ区切り) | `127.0.0.1,::1` |
+| `default_monthly_cap` | `AI_PROXY_DEFAULT_MONTHLY_CAP` | `60000000`(キー発行時の推奨値。`0` で上限なしを推奨) |
 
 環境変数は設定ファイルより優先する。`AI_PROXY_MODELS` を設定すると許可モデルが丸ごと置き換わる。
 `RUST_LOG` はそのまま効く(`RUST_LOG=ai_proxy=debug`)。
@@ -96,8 +97,9 @@ ai-proxy config --config ./ai-proxy.toml
 
 ```bash
 # 発行。キー全文はこのときしか出ない
-ai-proxy key add --device laptop --limit 5M      # 月500万トークンまで(モデルは許可リスト)
-ai-proxy key add --device ws --all-models        # モデル制限なし、上限なし
+ai-proxy key add --device laptop              # 端末なら上限を対話で聞く(Enter で推奨値)
+ai-proxy key add --device laptop --limit 60M --weekly 15M --limit-5h 1.5M
+ai-proxy key add --device ws --all-models     # モデル制限なし、上限なし
 # 本文保存を有効にして発行(既定 24 時間で自動オフ)
 ai-proxy key add --device laptop --capture
 
@@ -106,15 +108,34 @@ ai-proxy key revoke 3MS4P2J3
 ai-proxy key capture 3MS4P2J3 --hours 2   # 既存キーの本文保存を後から有効化
 ai-proxy key capture 3MS4P2J3 --off
 ai-proxy key update 3MS4P2J3 --limit 20M  # 上限を後から変える
+ai-proxy key update 3MS4P2J3 --weekly 5M --limit-5h 500k
 ai-proxy key update 3MS4P2J3 --limit unlimited --all-models
 ```
 
-`--limit` は million 単位で書ける。`100M` = 100,000,000、ほかに `k` / `b`(`g`)、`_` 区切り。
-`--limit` を省くか `unlimited` を渡すと上限なし(既定)。`--all-models` を付けたキーは
-許可モデルの判定を通らない。
+上限は 3 つの窓で別々にかけられる。どれも省略でき、省略した窓は上限なし。
 
-上限に達したキーは 429 `insufficient_quota` と `Retry-After` を返し、次の月初まで通り抜けない。
+| 窓 | フラグ | 数え方 |
+| --- | --- | --- |
+| 月次 | `--limit`(`--limit-monthly`) | 暦月(UTC の 1 日 00:00 から) |
+| 週次 | `--weekly`(`--limit-week`) | 直近 7 日間のローリング |
+| 5 時間 | `--limit-5h`(`--5h`) | 直近 5 時間のローリング |
+
+数値は `100M` `1.5M` `250k` のように書ける(`k` / `m` / `b`、`_` `,` 区切り可)。
+`unlimited` / `none` / `-` で上限を外す。
+
+**端末でフラグを 1 つも付けずに `key add` すると対話で聞く。** 何も考えないときは
+Enter を 3 回叩けば推奨値が入る(月次 = `default_monthly_cap`、週次 = 月次/4、
+5 時間 = 週次/10)。パイプや CI など端末でない場合は問いず、省略した窓は上限なし。
+
+上限に達したキーは 429 `insufficient_quota` と `Retry-After` を返す。メッセージで
+どの窓かが分かる(`5-hour token limit reached` など)。`Retry-After` は、月次なら次の
+月初まで、ローリング窓なら**窓の中で一番古いリクエストが外れるまで**の秒数。
+つまり「あと何秒待てば 1 本通るか」であって「窓が空になるまで」ではない。
 上限を跨いだリクエストは最後まで流し、`request.quota_exceeded` に 1 を立てる。
+
+判定は各窓の合計(input + output)を DB から引き直す。窓は詰まりの強い順(5 時間 →
+週次 → 月次)に見て、最初に当たった窓の名前を返す。並列リクエストは互いの消費を
+見ないので、上限ちょうどまで使ったキーが同時に投げると超える(既知の挙動)。
 
 キーは `Authorization: Bearer sk-aip-...`、`x-api-key`、`api-key` のどれでも受け付ける。
 

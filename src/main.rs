@@ -6,6 +6,7 @@ mod quota;
 mod report;
 mod tui;
 
+use std::io::{self, IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -61,9 +62,16 @@ enum KeyCommand {
         device: String,
         #[arg(long)]
         note: Option<String>,
-        /// Monthly token cap, e.g. `100M`, `1500000` or `unlimited`. Omit for no cap.
-        #[arg(long)]
+        /// Monthly token cap (`100M`, `1500000`, `unlimited`). Asked on a terminal
+        /// when every cap is omitted.
+        #[arg(long, alias = "limit-monthly")]
         limit: Option<String>,
+        /// Weekly token cap over the trailing 7 days.
+        #[arg(long, alias = "limit-week")]
+        weekly: Option<String>,
+        /// Token cap over the trailing 5 hours.
+        #[arg(long = "limit-5h", alias = "5h")]
+        five_hour: Option<String>,
         /// Lift the model allowlist for this key.
         #[arg(long)]
         all_models: bool,
@@ -72,12 +80,18 @@ enum KeyCommand {
         capture: bool,
     },
     List,
-    /// Change the cap or the model restriction of an existing key.
+    /// Change the caps or the model restriction of an existing key.
     Update {
         prefix: String,
-        /// New monthly cap, e.g. `100M`, `1500000` or `unlimited`.
-        #[arg(long)]
+        /// New monthly cap (`100M`, `unlimited` clears it).
+        #[arg(long, alias = "limit-monthly")]
         limit: Option<String>,
+        /// New weekly cap.
+        #[arg(long, alias = "limit-week")]
+        weekly: Option<String>,
+        /// New 5-hour cap.
+        #[arg(long = "limit-5h", alias = "5h")]
+        five_hour: Option<String>,
         /// Lift the model allowlist for this key.
         #[arg(long, conflicts_with = "restricted")]
         all_models: bool,
@@ -438,19 +452,18 @@ fn run_key(config_path: &Path, command: KeyCommand) -> Result<()> {
             device,
             note,
             limit,
+            weekly,
+            five_hour,
             all_models,
             capture,
         } => {
-            let limit = match limit {
-                Some(raw) => parse_limit(&raw)?,
-                None => None,
-            };
+            let caps = resolve_limits(limit, weekly, five_hour, config.default_monthly_cap)?;
             let capture_until = capture.then(|| now_ms() + config.capture_ttl_hours * 3_600_000);
             add_key(
                 &conn,
                 &device,
                 note.as_deref(),
-                limit,
+                caps,
                 all_models,
                 capture_until,
             )
@@ -459,12 +472,15 @@ fn run_key(config_path: &Path, command: KeyCommand) -> Result<()> {
         KeyCommand::Update {
             prefix,
             limit,
+            weekly,
+            five_hour,
             all_models,
             restricted,
         } => {
-            let limit = match limit {
-                Some(raw) => Some(parse_limit(&raw)?),
-                None => None,
+            let limits = db::KeyLimits {
+                monthly: limit.map(|raw| parse_limit(&raw)).transpose()?,
+                weekly: weekly.map(|raw| parse_limit(&raw)).transpose()?,
+                five_hour: five_hour.map(|raw| parse_limit(&raw)).transpose()?,
             };
             let allow_all_models = if all_models {
                 Some(true)
@@ -473,10 +489,10 @@ fn run_key(config_path: &Path, command: KeyCommand) -> Result<()> {
             } else {
                 None
             };
-            if limit.is_none() && allow_all_models.is_none() {
-                bail!("nothing to change: pass --limit or --all-models/--restricted");
+            if limits.is_empty() && allow_all_models.is_none() {
+                bail!("nothing to change: pass --limit, --weekly, --limit-5h or --all-models/--restricted");
             }
-            let changed = db::set_key_settings(&conn, &prefix, limit, allow_all_models)?;
+            let changed = db::set_key_settings(&conn, &prefix, limits, allow_all_models)?;
             if changed == 0 {
                 bail!("no key matched prefix `{prefix}`");
             }
@@ -515,7 +531,7 @@ fn add_key(
     conn: &Connection,
     device: &str,
     note: Option<&str>,
-    limit: Option<i64>,
+    caps: Caps,
     all_models: bool,
     capture_until: Option<i64>,
 ) -> Result<()> {
@@ -529,7 +545,9 @@ fn add_key(
             hash: &generated.hash,
             prefix: &generated.prefix,
             created_at: now,
-            monthly_token_limit: limit,
+            monthly_token_limit: caps.monthly,
+            weekly_token_limit: caps.weekly,
+            five_hour_token_limit: caps.five_hour,
             allow_all_models: all_models,
             capture_until,
         },
@@ -537,7 +555,9 @@ fn add_key(
     println!("id: {id}");
     println!("prefix: {}", generated.prefix);
     println!("key: {}", generated.full);
-    println!("limit: {}", fmt_limit(limit));
+    println!("limit monthly: {}", fmt_limit(caps.monthly));
+    println!("limit weekly: {}", fmt_limit(caps.weekly));
+    println!("limit 5h: {}", fmt_limit(caps.five_hour));
     println!("models: {}", if all_models { "all" } else { "allowlist" });
     if let Some(until) = capture_until {
         println!("capture: on until {}", format_ms(until));
@@ -545,34 +565,110 @@ fn add_key(
     Ok(())
 }
 
-/// Parses a monthly token cap. Accepts digits, `_` separators and a k/m/b suffix
-/// (`100M` = 100 million). `unlimited`, `none` and `-` clear the cap.
+/// Token caps for a new key.
+#[derive(Clone, Copy)]
+struct Caps {
+    monthly: Option<i64>,
+    weekly: Option<i64>,
+    five_hour: Option<i64>,
+}
+
+/// Resolves the three caps. With no flags on a terminal this asks for them,
+/// taking a recommendation on an empty answer; everywhere else the flags win
+/// and omissions mean no cap.
+fn resolve_limits(
+    monthly: Option<String>,
+    weekly: Option<String>,
+    five_hour: Option<String>,
+    recommended_monthly: i64,
+) -> Result<Caps> {
+    let any_flag = monthly.is_some() || weekly.is_some() || five_hour.is_some();
+    let mut caps = Caps {
+        monthly: monthly.map(|raw| parse_limit(&raw)).transpose()?.flatten(),
+        weekly: weekly.map(|raw| parse_limit(&raw)).transpose()?.flatten(),
+        five_hour: five_hour.map(|raw| parse_limit(&raw)).transpose()?.flatten(),
+    };
+    if any_flag || !io::stdin().is_terminal() {
+        return Ok(caps);
+    }
+
+    let recommended = match recommended_monthly {
+        value if value > 0 => Some(value),
+        _ => None,
+    };
+    eprintln!("token limits — Enter takes the recommendation, `unlimited` removes the cap");
+    caps.monthly = ask_limit("monthly", recommended)?;
+    let weekly_default = caps.monthly.map(|monthly| nice(monthly / 4));
+    caps.weekly = ask_limit("weekly", weekly_default)?;
+    let five_hour_default = caps
+        .weekly
+        .map(|weekly| nice(weekly / 10))
+        .or_else(|| caps.monthly.map(|monthly| nice(monthly / 40)));
+    caps.five_hour = ask_limit("5-hour", five_hour_default)?;
+    eprintln!(
+        "monthly {}, weekly {}, 5h {}",
+        fmt_limit(caps.monthly),
+        fmt_limit(caps.weekly),
+        fmt_limit(caps.five_hour)
+    );
+    Ok(caps)
+}
+
+fn ask_limit(label: &str, default: Option<i64>) -> Result<Option<i64>> {
+    let default_text = fmt_short(default);
+    eprint!("{label:>8} [{default_text}]: ");
+    io::stderr().flush()?;
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line)? == 0 {
+        bail!("input ended while asking for the {label} cap");
+    }
+    let text = line.trim();
+    if text.is_empty() {
+        return Ok(default);
+    }
+    parse_limit(text)
+}
+
+/// Rounds to two significant digits so derived caps read like round numbers.
+fn nice(value: i64) -> i64 {
+    if value < 100 {
+        return value;
+    }
+    let digits = (value as f64).log10().floor() as u32;
+    let magnitude = 10i64.pow(digits.saturating_sub(1));
+    ((value as f64 / magnitude as f64).round() as i64) * magnitude
+}
+
+/// Parses a token cap. Accepts digits, `.`, `_`/`,` separators and a k/m/b
+/// suffix (`100M` = 100 million, `1.5M` = 1.5 million). `unlimited`, `none`
+/// and `-` clear the cap.
 fn parse_limit(raw: &str) -> Result<Option<i64>> {
-    let text = raw.trim().to_ascii_lowercase().replace('_', "");
+    let text = raw.trim().to_ascii_lowercase().replace(['_', ','], "");
     if matches!(text.as_str(), "unlimited" | "none" | "-") {
         return Ok(None);
     }
     let (digits, scale) = if let Some(rest) = text.strip_suffix('k') {
-        (rest, 1_000)
+        (rest, 1_000f64)
     } else if let Some(rest) = text.strip_suffix('m') {
-        (rest, 1_000_000)
+        (rest, 1_000_000f64)
     } else if let Some(rest) = text.strip_suffix('b') {
-        (rest, 1_000_000_000)
+        (rest, 1_000_000_000f64)
     } else if let Some(rest) = text.strip_suffix('g') {
-        (rest, 1_000_000_000)
+        (rest, 1_000_000_000f64)
     } else {
-        (text.as_str(), 1)
+        (text.as_str(), 1f64)
     };
-    let value: i64 = digits
+    let value: f64 = digits
         .parse()
-        .with_context(|| format!("invalid limit `{raw}`; try 100M, 1500000 or unlimited"))?;
-    if value <= 0 {
+        .with_context(|| format!("invalid limit `{raw}`; try 100M, 1.5M, 1500000 or unlimited"))?;
+    if !value.is_finite() || value <= 0.0 {
         bail!("limit must be greater than zero (got `{raw}`)");
     }
-    value
-        .checked_mul(scale)
-        .with_context(|| format!("limit `{raw}` is too large"))
-        .map(Some)
+    let scaled = value * scale;
+    if scaled > i64::MAX as f64 {
+        bail!("limit `{raw}` is too large");
+    }
+    Ok(Some(scaled.round() as i64))
 }
 
 fn fmt_limit(limit: Option<i64>) -> String {
@@ -582,10 +678,27 @@ fn fmt_limit(limit: Option<i64>) -> String {
     }
 }
 
+/// Compact form for prompts and recommendations: `60M`, `1.5M`, `250K`.
+fn fmt_short(limit: Option<i64>) -> String {
+    let Some(value) = limit else {
+        return "unlimited".to_string();
+    };
+    if value % 1_000_000 == 0 {
+        format!("{}M", value / 1_000_000)
+    } else if value >= 1_000_000 && value % 1_000 == 0 {
+        format!("{:.1}M", value as f64 / 1_000_000f64)
+    } else if value >= 1_000 && value % 1_000 == 0 {
+        format!("{}K", value / 1_000)
+    } else {
+        value.to_string()
+    }
+}
+
 fn list_keys(conn: &Connection) -> Result<()> {
     let keys = db::list_keys(conn)?;
     let headers = [
-        "id", "device", "prefix", "created", "revoked", "limit", "models", "capture",
+        "id", "device", "prefix", "created", "revoked", "monthly", "weekly", "5h", "models",
+        "capture",
     ];
     let mut rows = Vec::with_capacity(keys.len());
     for key in &keys {
@@ -598,6 +711,8 @@ fn list_keys(conn: &Connection) -> Result<()> {
                 .map(format_ms)
                 .unwrap_or_else(|| "-".to_string()),
             fmt_limit(key.monthly_token_limit),
+            fmt_limit(key.weekly_token_limit),
+            fmt_limit(key.five_hour_token_limit),
             if key.allow_all_models {
                 "all".to_string()
             } else {

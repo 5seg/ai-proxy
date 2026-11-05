@@ -16,6 +16,7 @@ use crate::db::{self, NewRequest};
 use crate::proxy::auth::{self, AuthContext};
 use crate::proxy::usage::{self, SseUsageScanner, Usage};
 use crate::proxy::{ApiError, AppState};
+use crate::quota;
 
 const PROMPT_HASH_LIMIT: usize = 4096;
 
@@ -154,32 +155,67 @@ async fn relay(
     }
 
     let now = time::OffsetDateTime::now_utc();
-    if let Some(limit) = auth.monthly_token_limit {
-        let used = {
+    let mut tightest: Option<QuotaBudget> = None;
+    for window in quota::Window::ALL {
+        let Some(limit) = auth.limit_for(window) else {
+            continue;
+        };
+        let (used, oldest) = {
             let conn = match state.db.lock() {
                 Ok(conn) => conn,
                 Err(_) => return ApiError::internal().into_response(),
             };
-            match db::month_tokens_used(&conn, auth.api_key_id, crate::quota::month_start_ms(now)) {
+            let since = window.since(now);
+            let used = match db::tokens_used_since(&conn, auth.api_key_id, since) {
                 Ok(used) => used,
                 Err(err) => {
-                    tracing::error!(error = %err, "failed to sum monthly tokens");
+                    tracing::error!(error = %err, window = window.name(), "failed to sum tokens");
                     return ApiError::internal().into_response();
                 }
-            }
+            };
+            let oldest = if used >= limit {
+                match db::oldest_request_since(&conn, auth.api_key_id, since) {
+                    Ok(oldest) => oldest,
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            window = window.name(),
+                            "failed to find the oldest request in the window"
+                        );
+                        return ApiError::internal().into_response();
+                    }
+                }
+            } else {
+                None
+            };
+            (used, oldest)
         };
         if used >= limit {
+            let retry_after = quota::retry_after_seconds(window, now, oldest);
+            tracing::info!(
+                window = window.name(),
+                limit,
+                used,
+                retry_after,
+                "quota exceeded"
+            );
             guard.status_code = Some(StatusCode::TOO_MANY_REQUESTS.as_u16() as i64);
             guard.quota_exceeded = true;
             guard.finish(Some("quota_exceeded"), None, false);
-            return ApiError::insufficient_quota(crate::quota::retry_after_seconds(now))
-                .into_response();
+            return ApiError::insufficient_quota(window, retry_after).into_response();
         }
-        guard.quota = Some(QuotaBudget {
+        let budget = QuotaBudget {
             limit,
             used_before: used,
-        });
+        };
+        if tightest
+            .map(|current| budget.remaining() < current.remaining())
+            .unwrap_or(true)
+        {
+            tightest = Some(budget);
+        }
     }
+    guard.quota = tightest;
 
     let url = format!(
         "{}{}",
@@ -451,6 +487,12 @@ impl Drop for StreamRelay {
 struct QuotaBudget {
     limit: i64,
     used_before: i64,
+}
+
+impl QuotaBudget {
+    fn remaining(&self) -> i64 {
+        self.limit - self.used_before
+    }
 }
 
 struct RequestGuard {

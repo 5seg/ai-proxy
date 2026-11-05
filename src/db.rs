@@ -11,6 +11,8 @@ pub struct KeyAuth {
     pub id: i64,
     pub device_id: i64,
     pub monthly_token_limit: Option<i64>,
+    pub weekly_token_limit: Option<i64>,
+    pub five_hour_token_limit: Option<i64>,
     pub allow_all_models: bool,
     pub capture_bodies: bool,
     pub revoked: bool,
@@ -40,8 +42,25 @@ pub struct KeyListRow {
     pub created_at: i64,
     pub revoked_at: Option<i64>,
     pub monthly_token_limit: Option<i64>,
+    pub weekly_token_limit: Option<i64>,
+    pub five_hour_token_limit: Option<i64>,
     pub allow_all_models: bool,
     pub capture_until: Option<i64>,
+}
+
+/// Per-window caps. Each field is `None` when the caller does not touch it and
+/// `Some(None)` when the cap should be cleared.
+#[derive(Default)]
+pub struct KeyLimits {
+    pub monthly: Option<Option<i64>>,
+    pub weekly: Option<Option<i64>>,
+    pub five_hour: Option<Option<i64>>,
+}
+
+impl KeyLimits {
+    pub fn is_empty(&self) -> bool {
+        self.monthly.is_none() && self.weekly.is_none() && self.five_hour.is_none()
+    }
 }
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -79,6 +98,10 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if version < 2 {
         conn.execute_batch(MIGRATION_V2)?;
+        version = 2;
+    }
+    if version < 3 {
+        conn.execute_batch(MIGRATION_V3)?;
     }
     Ok(())
 }
@@ -106,6 +129,8 @@ pub struct NewApiKey<'a> {
     pub prefix: &'a str,
     pub created_at: i64,
     pub monthly_token_limit: Option<i64>,
+    pub weekly_token_limit: Option<i64>,
+    pub five_hour_token_limit: Option<i64>,
     pub allow_all_models: bool,
     pub capture_until: Option<i64>,
 }
@@ -117,21 +142,25 @@ pub fn insert_api_key(conn: &Connection, key: NewApiKey<'_>) -> Result<i64> {
         prefix,
         created_at,
         monthly_token_limit,
+        weekly_token_limit,
+        five_hour_token_limit,
         allow_all_models,
         capture_until,
     } = key;
     let capture_bodies = if capture_until.is_some() { 1 } else { 0 };
     conn.execute(
         "INSERT INTO api_key
-         (device_id, key_hash, prefix, created_at, monthly_token_limit, allow_all_models,
-          capture_bodies, capture_until)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         (device_id, key_hash, prefix, created_at, monthly_token_limit, weekly_token_limit,
+          five_hour_token_limit, allow_all_models, capture_bodies, capture_until)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             device_id,
             hash.as_slice(),
             prefix,
             created_at,
             monthly_token_limit,
+            weekly_token_limit,
+            five_hour_token_limit,
             allow_all_models as i64,
             capture_bodies,
             capture_until
@@ -143,7 +172,8 @@ pub fn insert_api_key(conn: &Connection, key: NewApiKey<'_>) -> Result<i64> {
 pub fn list_keys(conn: &Connection) -> Result<Vec<KeyListRow>> {
     let mut stmt = conn.prepare(
         "SELECT k.id, d.name, k.prefix, k.created_at, k.revoked_at, k.monthly_token_limit,
-                k.allow_all_models, k.capture_until
+                k.weekly_token_limit, k.five_hour_token_limit, k.allow_all_models,
+                k.capture_until
          FROM api_key k
          JOIN device d ON d.id = k.device_id
          ORDER BY k.id",
@@ -156,8 +186,10 @@ pub fn list_keys(conn: &Connection) -> Result<Vec<KeyListRow>> {
             created_at: row.get(3)?,
             revoked_at: row.get(4)?,
             monthly_token_limit: row.get(5)?,
-            allow_all_models: row.get::<_, i64>(6)? != 0,
-            capture_until: row.get(7)?,
+            weekly_token_limit: row.get(6)?,
+            five_hour_token_limit: row.get(7)?,
+            allow_all_models: row.get::<_, i64>(8)? != 0,
+            capture_until: row.get(9)?,
         })
     })?;
 
@@ -179,8 +211,8 @@ pub fn revoke_keys(conn: &Connection, prefix: &str, now: i64) -> Result<usize> {
 
 pub fn find_key(conn: &Connection, hash: &[u8; 32]) -> Result<Option<KeyAuth>> {
     let mut stmt = conn.prepare(
-        "SELECT id, device_id, key_hash, revoked_at, monthly_token_limit, capture_bodies,
-                allow_all_models
+        "SELECT id, device_id, key_hash, revoked_at, monthly_token_limit, weekly_token_limit,
+                five_hour_token_limit, capture_bodies, allow_all_models
          FROM api_key",
     )?;
     let mut rows = stmt.query([])?;
@@ -193,8 +225,10 @@ pub fn find_key(conn: &Connection, hash: &[u8; 32]) -> Result<Option<KeyAuth>> {
                 id: row.get(0)?,
                 device_id: row.get(1)?,
                 monthly_token_limit: row.get(4)?,
-                capture_bodies: row.get::<_, i64>(5)? != 0,
-                allow_all_models: row.get::<_, i64>(6)? != 0,
+                weekly_token_limit: row.get(5)?,
+                five_hour_token_limit: row.get(6)?,
+                capture_bodies: row.get::<_, i64>(7)? != 0,
+                allow_all_models: row.get::<_, i64>(8)? != 0,
                 revoked: revoked_at.is_some(),
             });
         }
@@ -238,19 +272,33 @@ pub fn set_capture(conn: &Connection, prefix: &str, until: Option<i64>) -> Resul
     Ok(changed)
 }
 
-/// `limit`: `Some(None)` clears the cap, `Some(Some(n))` sets it, `None` leaves it alone.
+/// Each limit: `Some(None)` clears the cap, `Some(Some(n))` sets it, `None`
+/// leaves it alone.
 pub fn set_key_settings(
     conn: &Connection,
     prefix: &str,
-    limit: Option<Option<i64>>,
+    limits: KeyLimits,
     allow_all_models: Option<bool>,
 ) -> Result<usize> {
-    if let Some(limit) = limit {
-        conn.execute(
-            "UPDATE api_key SET monthly_token_limit = ?1
-             WHERE substr(prefix, 1, length(?2)) = ?2",
-            params![limit, prefix],
-        )?;
+    let KeyLimits {
+        monthly,
+        weekly,
+        five_hour,
+    } = limits;
+    for (column, limit) in [
+        ("monthly_token_limit", monthly),
+        ("weekly_token_limit", weekly),
+        ("five_hour_token_limit", five_hour),
+    ] {
+        if let Some(limit) = limit {
+            conn.execute(
+                &format!(
+                    "UPDATE api_key SET {column} = ?1
+                     WHERE substr(prefix, 1, length(?2)) = ?2"
+                ),
+                params![limit, prefix],
+            )?;
+        }
     }
     if let Some(allow) = allow_all_models {
         conn.execute(
@@ -349,7 +397,8 @@ pub fn rollup_range(conn: &Connection, since: i64) -> Result<usize> {
     Ok(total)
 }
 
-pub fn month_tokens_used(conn: &Connection, api_key_id: i64, since: i64) -> Result<i64> {
+/// Tokens billed to a key since `since`, input and output together.
+pub fn tokens_used_since(conn: &Connection, api_key_id: i64, since: i64) -> Result<i64> {
     let total: i64 = conn.query_row(
         "SELECT COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)
          FROM request WHERE api_key_id = ?1 AND started_at >= ?2",
@@ -357,6 +406,17 @@ pub fn month_tokens_used(conn: &Connection, api_key_id: i64, since: i64) -> Resu
         |row| row.get(0),
     )?;
     Ok(total)
+}
+
+/// Start of the oldest request still inside a rolling window, so a 429 can say
+/// when the window will free space. `None` when the window is empty.
+pub fn oldest_request_since(conn: &Connection, api_key_id: i64, since: i64) -> Result<Option<i64>> {
+    let oldest: Option<i64> = conn.query_row(
+        "SELECT MIN(started_at) FROM request WHERE api_key_id = ?1 AND started_at >= ?2",
+        params![api_key_id, since],
+        |row| row.get(0),
+    )?;
+    Ok(oldest)
 }
 
 pub struct FinishRequest<'a> {
@@ -525,4 +585,12 @@ COMMIT;
 const MIGRATION_V2: &str = "
 ALTER TABLE api_key ADD COLUMN allow_all_models INTEGER NOT NULL DEFAULT 0;
 PRAGMA user_version = 2;
+";
+
+/// Version 3 caps a key per week and per 5 hours, next to the monthly cap.
+/// Existing keys keep `NULL`, which means no cap on the new windows.
+const MIGRATION_V3: &str = "
+ALTER TABLE api_key ADD COLUMN weekly_token_limit INTEGER;
+ALTER TABLE api_key ADD COLUMN five_hour_token_limit INTEGER;
+PRAGMA user_version = 3;
 ";

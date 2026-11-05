@@ -113,11 +113,11 @@ impl ApiError {
         }
     }
 
-    pub fn insufficient_quota(retry_after_seconds: i64) -> Self {
+    pub fn insufficient_quota(window: crate::quota::Window, retry_after_seconds: i64) -> Self {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,
             code: "insufficient_quota",
-            message: "monthly token limit reached".to_string(),
+            message: format!("{} token limit reached", window.description()),
             www_authenticate: false,
             retry_after: Some(retry_after_seconds),
         }

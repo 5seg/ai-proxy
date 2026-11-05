@@ -144,21 +144,38 @@ ai-proxy key update 3MS4P2J3 --all-models --limit 500M
 
 ## 6. クォータ
 
-キーごとに月次トークン上限を持つ。`monthly_token_limit` が NULL なら上限なしで、判定自体を飛ばす。判定は受付時と完了時の2回行う。
+キーごとに 3 つの窓でトークン上限を持つ。`monthly_token_limit` / `weekly_token_limit` /
+`five_hour_token_limit` がすべて NULL なら上限なしで、判定自体を飛ばす。判定は受付時と完了時の2回行う。
 
-- 受付時: 当月合計が上限以上であれば 429 を返す。`Retry-After` は月初まで。
+| 窓 | 列 | 範囲 |
+| --- | --- | --- |
+| 月次 | `monthly_token_limit` | 暦月(UTC 1日 00:00 から) |
+| 週次 | `weekly_token_limit` | 直近 7 日間のローリング |
+| 5 時間 | `five_hour_token_limit` | 直近 5 時間のローリング |
+
+- 受付時: 各窓の合計が上限以上であれば 429 を返す。窓は 5 時間 → 週次 → 月次の順に見て、
+  最初に当たった窓の名前を `error.message` に出す(最も詰まっている窓を返すため)。
+- `Retry-After`: 月次は月初まで。ローリング窓は `MIN(started_at) + 窓長 - now`、
+  つまり窓の中で一番古いリクエストが外れるまで。窓が空なら窓長を返す。
 - 実行中: 打ち切らない。最後まで流し、次回の受付で拒否する。打ち切ると usage が取れず、クライアントには中途半端な応答が渡るためである。
-- 完了時: 使用量を加算し、`quota_exceeded` を立てる。
+- 完了時: 使用量を加算し、`quota_exceeded` を立てる。判定には複数窓のうち残量が最小のものを使う。
 
-当月合計は `request` テーブルの `SUM` で求める。`(api_key_id, ts)` の索引があれば数千行の走査で済む。同時多発リクエストで上限をわずかに超えることは許容し、厳密な予約はしない。
+合計は `request` テーブルの `SUM` で求める。`(api_key_id, started_at)` の索引があれば数千行の走査で済む。
+3 窓でもクエリは `since` が違うだけで、索引の範囲走査が 3 回になるだけ。同時多発リクエストで
+上限をわずかに超えることは許容し、厳密な予約はしない。
 
-上限判定に使うトークン数は、まず `input + output` の生の合計とする。キャッシュ読み取りの重み付けを変えたいときに備えて、重みは設定値にしておく。
+月次だけ暦月で、短い 2 窓をローリングにしたのは、短い窓の目的が「暴走の停止」だからである。
+固定ブロック(例: epoch から 5 時間区切り)だと境界を跨いで 2 倍使え、目的に反する。
+暦月は請求の区切りとして人間が読む単位なのでそのままにした。
+
+上限判定に使うトークン数は、まず `input + output` の生の合計とする。キャッシュ読み取りの重み付けを変えたいときに備えて、重みは設定値にしておく(`quota_weight_*` は未使用)。
 
 ## 7. 保存
 
 ```sql
 device(id, name, note, created_at)
 api_key(id, device_id, key_hash, prefix, created_at, revoked_at, monthly_token_limit,
+        weekly_token_limit, five_hour_token_limit,
         allow_all_models, quota_weight_input, quota_weight_cached, quota_weight_output,
         capture_bodies, capture_until)
 request(id, ts, device_id, api_key_id, client_ip, endpoint, model, stream,
