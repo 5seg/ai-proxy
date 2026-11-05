@@ -602,18 +602,14 @@ fn resolve_limits(
         _ => None,
     };
     eprintln!("token limits — Enter takes the recommendation, `unlimited` removes the cap");
-    let monthly_basis = match recommended {
-        Some(_) => Some("default_monthly_cap"),
-        None => None,
-    };
-    caps.monthly = ask_limit("monthly", recommended, monthly_basis)?;
+    caps.monthly = ask_limit("monthly", recommended)?;
     let weekly_default = caps.monthly.map(|monthly| nice(monthly / WEEKLY_PER_MONTH));
-    caps.weekly = ask_limit("weekly", weekly_default, Some("monthly/4"))?;
+    caps.weekly = ask_limit("weekly", weekly_default)?;
     let five_hour_default = caps
         .weekly
         .map(|weekly| nice(weekly / FIVE_HOUR_PER_WEEK))
         .or_else(|| caps.monthly.map(|monthly| nice(monthly / 40)));
-    caps.five_hour = ask_limit("5-hour", five_hour_default, Some("weekly/10"))?;
+    caps.five_hour = ask_limit("5-hour", five_hour_default)?;
     eprintln!(
         "monthly {}, weekly {}, 5h {}",
         fmt_limit(caps.monthly),
@@ -623,13 +619,9 @@ fn resolve_limits(
     Ok(caps)
 }
 
-fn ask_limit(label: &str, default: Option<i64>, basis: Option<&str>) -> Result<Option<i64>> {
+fn ask_limit(label: &str, default: Option<i64>) -> Result<Option<i64>> {
     let default_text = fmt_short(default);
-    let basis_text = match basis {
-        Some(basis) if default.is_some() => format!(" = {basis}"),
-        _ => String::new(),
-    };
-    eprint!("{label:>8} [{default_text}{basis_text}]: ");
+    eprint!("{label:>8} [{default_text}]: ");
     io::stderr().flush()?;
     let mut line = String::new();
     if io::stdin().read_line(&mut line)? == 0 {
