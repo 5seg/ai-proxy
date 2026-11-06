@@ -57,8 +57,12 @@ gh release download  # タグを打っていればこちら
 ai-proxy serve --config ./ai-proxy.toml
 ```
 
-設定ファイルは省略できる。その場合の実効値は既定値と `AI_PROXY_*` 環境変数で決まる。
-上流キーが空だと `serve` は起動を拒否する。
+`--config` を省いたときは `./ai-proxy.toml` → `/etc/ai-proxy/config.toml` の順に探す。
+どちらも無ければエラーで止まる(空の DB を黙って作らない)。
+サービス用の設定を読むには、そのファイルを読める権限が要る(0640 root:ai-proxy なら
+`ai-proxy` グループに所属させる)。
+
+`AI_PROXY_*` 環境変数は設定ファイルより優先される。上流キーが空だと `serve` は起動を拒否する。
 
 ## 設定
 
@@ -197,8 +201,8 @@ ai-proxy db rollup && ai-proxy db prune   # 集計してから消す
 ```bash
 sudo install -m755 ai-proxy /usr/local/bin/ai-proxy
 sudo install -d -m750 /etc/ai-proxy
-sudo cp deploy/env.example /etc/ai-proxy/env && sudo chmod 600 /etc/ai-proxy/env
-$EDITOR /etc/ai-proxy/env          # AI_PROXY_UPSTREAM_API_KEY を書く
+sudo install -m640 -o root -g ai-proxy ai-proxy.toml /etc/ai-proxy/config.toml
+sudo vi /etc/ai-proxy/config.toml   # upstream_api_key と listen を書く
 ```
 
 起動方法はホストの init に任せる(unit は同梱しない)。DB は `db_path` か
@@ -206,7 +210,8 @@ $EDITOR /etc/ai-proxy/env          # AI_PROXY_UPSTREAM_API_KEY を書く
 ログをファイルに出す場合、プロセスはサービスユーザに降格してから書き込むので、
 ログファイルの所有者もそのユーザにしておく。
 
-unit に設定を置かない前提なので、`--config` 無しでも環境変数だけで起動できる。
+サービス用の設定を `--config` 無しで読むには `/etc/ai-proxy/config.toml` を置く(探索順で拾う)。
+管理コマンドを非 root で動かすなら、そのユーザを `ai-proxy` グループに入れて 0640 を読めるようにする。
 
 ## エンドポイント
 

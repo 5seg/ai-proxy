@@ -25,10 +25,34 @@ use crate::report::{Agg, Group, Prices, Table};
 #[derive(Parser)]
 #[command(name = "ai-proxy", version)]
 struct Cli {
-    #[arg(long, global = true, default_value = "./ai-proxy.toml")]
-    config: PathBuf,
+    /// Config file. Defaults to ./ai-proxy.toml, then /etc/ai-proxy/config.toml.
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
+}
+
+const LOCAL_CONFIG: &str = "./ai-proxy.toml";
+const SYSTEM_CONFIG: &str = "/etc/ai-proxy/config.toml";
+
+/// 設定を明示されなかったときは、カレントの ai-proxy.toml → /etc/ai-proxy/config.toml
+/// の順に探す。どちらも無ければ迷わず失敗させる(空の DB を作らない)。
+fn resolve_config(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    let local = PathBuf::from(LOCAL_CONFIG);
+    if local.exists() {
+        return Ok(local);
+    }
+    let system = PathBuf::from(SYSTEM_CONFIG);
+    if system.exists() {
+        eprintln!("using {SYSTEM_CONFIG}");
+        return Ok(system);
+    }
+    bail!(
+        "no config found: pass --config (looked at {LOCAL_CONFIG} and {SYSTEM_CONFIG})"
+    )
 }
 
 #[derive(Subcommand)]
@@ -141,15 +165,16 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    let config = resolve_config(cli.config)?;
     match cli.command {
-        Command::Serve => serve(&cli.config).await,
-        Command::Tui => run_tui(&cli.config),
-        Command::Report { days, month, csv } => run_report(&cli.config, days, month.as_deref(), csv),
-        Command::Config => show_config(&cli.config),
-        Command::Key { command } => run_key(&cli.config, command),
+        Command::Serve => serve(&config).await,
+        Command::Tui => run_tui(&config),
+        Command::Report { days, month, csv } => run_report(&config, days, month.as_deref(), csv),
+        Command::Config => show_config(&config),
+        Command::Key { command } => run_key(&config, command),
         Command::Db { command } => match command {
-            DbCommand::Prune { days } => run_prune(&cli.config, days),
-            DbCommand::Rollup { days } => run_rollup(&cli.config, days),
+            DbCommand::Prune { days } => run_prune(&config, days),
+            DbCommand::Rollup { days } => run_rollup(&config, days),
         },
     }
 }
