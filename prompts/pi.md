@@ -1,59 +1,66 @@
-# タスク: pi に ai-proxy プロバイダを追加する
+# Task: add the ai-proxy provider to pi
 
-あなたはコーディングエージェントである。ユーザーの pi に `ai-proxy` という
-プロバイダを 1 つ追加し、そこ経由でモデルが使える状態にする。**既存のプロバイダ設定は
-1 文字も変えない。** 追記とマージだけを行う。
+You are a coding agent. Add exactly one provider named `ai-proxy` to the user's pi and leave it
+usable. **Do not change existing provider configuration.** Your job is to merge, not to replace.
 
-## 入力
+## Inputs
 
-- **API キー**: `sk-aip-...`。このプロンプトに書かれているか、環境変数 `AIPROXY_KEY`
-  にある。どちらも無ければ推測せず、「キーが見つからない」と言って止まる。
-- **ベース URL**: `https://router.ht1.top/v1` 固定。
-- **モデル**: 決め打ちしない。下の手順 2 で `GET /v1/models` が返したものだけを書く。
+- **API key**: `sk-aip-...`. It is either inline in this prompt or in the environment
+  variable `AIPROXY_KEY`. If neither exists, do not guess — say the key is missing and stop.
+- **Base URL**: `https://router.ht1.top/v1`, fixed.
+- **Models**: never hardcode IDs. Use only what `GET /v1/models` returns in step 2.
 
-## 手順
+## Steps
 
-### 1. 既存設定を読む
+### 1. Inspect the existing config
 
-対象は `~/.pi/agent/models.json`。無ければ
-`{ "$schema": "https://pi.dev/schemas/models.schema.json", "providers": {} }` から作る。
-
-JSON(コメント無し)なので `jq` か何かで読み、`providers` に 1 キー足して書き戻す。
-既存の `providers` 配下には触らない。
+The target is `~/.pi/agent/models.json` and it may not exist yet. Look before you write:
 
 ```bash
-jq '.providers | keys' ~/.pi/agent/models.json
+python3 -c 'import json,os;p=os.path.expanduser("~/.pi/agent/models.json");print(sorted(json.load(open(p))["providers"])) if os.path.exists(p) else print("missing")'
 ```
 
-### 2. このキーで使えるモデルを確認する
+Two rules matter more than the tool you pick:
+
+1. Merge into the existing object. Never rebuild the file from scratch, never drop another
+   provider.
+2. Write to a temporary file in the same directory, then rename it over the original. Shell
+   redirection of the form `tool file > file` truncates the file before reading it.
+
+Reformatting existing entries (indentation, key order) is acceptable. Losing a key is not.
+
+### 2. Discover the models this key may call
 
 ```bash
 curl -sS -o /tmp/aiproxy-models.json -w '%{http_code}\n' \
   https://router.ht1.top/v1/models -H "Authorization: Bearer $KEY"
 ```
 
-- `200`: `/tmp/aiproxy-models.json` の `data[].id` がこのキーで使えるモデル。
-- `401`: キーが違うか失効している。止まる。
-- 接続できない: ネットワークを疑う。URL は上記で固定なので、変えずに報告する。
+- `200`: every `data[].id` in `/tmp/aiproxy-models.json` is callable with this key.
+- `401`: the key is wrong or revoked. Stop.
+- Connection failure: suspect the network. The URL is fixed, so report the failure instead of
+  substituting a different endpoint.
 
-### 3. プロバイダを追記する
+Entries are passed through from the upstream catalog, so fields such as `context_length` and
+`max_tokens` may be present. Prefer those values over the ones in step 3 when they are there.
 
-`providers` に `ai-proxy` を足す。`<MODEL_ID>` は手順 2 で得た ID(複数あれば全部)に
-置き換える。
+### 3. Add the provider
+
+The provider object has this shape. Replace `<MODEL_ID>` with an ID from step 2 and
+`<MODEL_NAME>` with a short human label derived from it (`deepseek/deepseek-v4.1-flash` becomes
+`DeepSeek V4.1 Flash`). Repeat the `models` entry once per ID.
 
 ```json
-"ai-proxy": {
+{
   "name": "ai-proxy",
   "baseUrl": "https://router.ht1.top/v1",
   "api": "openai-completions",
   "apiKey": "$AIPROXY_KEY",
-  "compat": {
-    "supportsDeveloperRole": false
-  },
+  "compat": { "supportsDeveloperRole": false },
   "models": [
     {
-      "id": "deepseek/deepseek-v4.1-flash",
-      "name": "DeepSeek V4.1 Flash (ai-proxy)",
+      "id": "<MODEL_ID>",
+      "name": "<MODEL_NAME> (ai-proxy)",
       "reasoning": true,
       "thinkingLevelMap": {
         "off": "off",
@@ -67,65 +74,114 @@ curl -sS -o /tmp/aiproxy-models.json -w '%{http_code}\n' \
       "contextWindow": 1000000,
       "maxTokens": 65536,
       "input": ["text", "image"],
-      "cost": {
-        "input": 0.15,
-        "output": 0.6,
-        "cacheRead": 0.003,
-        "cacheWrite": 0
-      }
+      "cost": { "input": 0.15, "output": 0.6, "cacheRead": 0.003, "cacheWrite": 0 }
     }
   ]
 }
 ```
 
-- `apiKey` は、キーを環境変数で渡されたなら `"$AIPROXY_KEY"` のまま
-  (pi は `$NAME` / `${NAME}` を環境変数で展開する)。プロンプトに直書きで渡されたなら
-  その文字列にする。どちらの場合もファイルのパーミッションを `600` にする。
-- `id` は `provider/id` の形なのでスラッシュを含む。pi 側は `ai-proxy` を
-  プロバイダ名として解釈するので、このままでよい。
-- `name` は人間が `/model` で見るラベル。`(ai-proxy)` を付けて素の提供元と区別する。
-- `contextWindow` / `maxTokens` / `input` / `cost` は今回のモデルの実測値。
-  別モデルを足すときは値を確認してから書く。`cost` の単位は USD / 100 万トークン。
+The following is a complete, idempotent merge that works on a machine with `python3` and no
+`jq`. Edit the literal values in place, then run it. It creates the file when missing, keeps
+every other provider, and never truncates the file it reads:
 
-`baseUrl` は `/v1` まで。`/v1/chat/completions` を書くと `/v1/v1/...` になって 404 になる。
+```bash
+python3 - <<'PY'
+import json, os, tempfile
 
-### 4. 既定モデルにするか確認する
+path = os.path.expanduser("~/.pi/agent/models.json")
+if os.path.exists(path):
+    with open(path) as f:
+        cfg = json.load(f)
+else:
+    cfg = {"$schema": "https://pi.dev/schemas/models.schema.json", "providers": {}}
 
-ユーザーが「これを使え」と言った場合だけ、`~/.pi/agent/settings.json` の既定モデルを
-`ai-proxy/<MODEL_ID>` に変える。言われていなければ触らない。
+cfg.setdefault("providers", {})["ai-proxy"] = {
+    "name": "ai-proxy",
+    "baseUrl": "https://router.ht1.top/v1",
+    "api": "openai-completions",
+    "apiKey": "$AIPROXY_KEY",
+    "compat": {"supportsDeveloperRole": False},
+    "models": [
+        {
+            "id": "<MODEL_ID>",
+            "name": "<MODEL_NAME> (ai-proxy)",
+            "reasoning": True,
+            "thinkingLevelMap": {"off": "off", "minimal": None, "low": "low",
+                                 "medium": None, "high": "high", "xhigh": None, "max": "max"},
+            "contextWindow": 1000000,
+            "maxTokens": 65536,
+            "input": ["text", "image"],
+            "cost": {"input": 0.15, "output": 0.6, "cacheRead": 0.003, "cacheWrite": 0},
+        }
+    ],
+}
 
-### 5. 検証する
+os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)))
+with os.fdopen(fd, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+os.replace(tmp, path)
+PY
+chmod 600 ~/.pi/agent/models.json
+```
+
+Field rules:
+
+- The `contextWindow`, `maxTokens`, and `cost` numbers above are the upstream specification of
+  `deepseek/deepseek-v4.1-flash`, the default model. For any other ID do not copy them blindly:
+  drop `thinkingLevelMap` and `cost`, keep `contextWindow` and `maxTokens` only if the catalog in
+  step 2 states them, and otherwise ask the operator.
+- `compat.supportsDeveloperRole` is off because the upstream rejects the `developer` role. The
+  proxy forwards request bodies verbatim, so this is the client's job to get right.
+- If the key arrives through the environment, keep `apiKey` as `"$AIPROXY_KEY"`; pi expands
+  `$NAME` and `${NAME}`. If it was handed to you inline, write the literal string instead.
+- `id` gets combined as `provider/id`, so it contains a slash. pi treats `ai-proxy` as the
+  provider segment; leave it as is.
+- `name` is the label in pi's `/model` selector. Keep the `(ai-proxy)` suffix so it is not
+  confused with the direct provider.
+- The base URL stops at `/v1`. Writing `/v1/chat/completions` produces `/v1/v1/...` and a 404.
+
+### 4. Make it the default only if asked
+
+If and only if the user said to use this model, set the default model in
+`~/.pi/agent/settings.json` to `ai-proxy/<MODEL_ID>`. Otherwise do not touch that file.
+
+### 5. Verify
 
 ```bash
 pi --list-models ai-proxy
 pi --model "ai-proxy/<MODEL_ID>" -p "reply with the single word ok"
 ```
 
-1 つ目にモデルが出ること、2 つ目で応答が返ることを確認する。`/model` を開き直すと
-`models.json` が再読込されるので、TUI から選ぶ場合も一度開き直す。
+The first must list the model; the second must produce a response. If the user picks models in
+the TUI, reopening `/model` reloads `models.json`.
 
-## うまくいかないとき
+## When it fails
 
-| 症状 | 原因 | 対処 |
+| Symptom | Cause | Action |
 | --- | --- | --- |
-| 401 `invalid_api_key` | キーが違う/失効 | キーを確認する。勝手に作り直さない |
-| 404 `not_found` | ベース URL のパス誤り | `/v1` までで止める |
-| 403 `model_not_allowed` | キーの許可リスト外 | `GET /v1/models` の ID だけを使う |
-| 404 `model_not_found` | モデル ID の綴り誤り | 同上 |
-| 429 `insufficient_quota` | 月次 / 週次 / 5 時間の上限 | `Retry-After` の秒数だけ待つ。上げたいなら管理者に頼む |
-| 502 `upstream_unavailable` | 上流の一時障害 | 少し待って 1 回だけ再試行する |
-| モデルが `/model` に出ない | 認証が解決できていない | `apiKey` の展開結果が空でないか確認する(`pi --list-models` でも落ちる) |
+| 400 `invalid_request` | malformed JSON body, or no `model` field | Fix the request shape |
+| 401 `invalid_api_key` | wrong or revoked key | Check the key. Never mint your own |
+| 403 `model_not_allowed` | model not on this key's allowlist | Use only IDs from `GET /v1/models` |
+| 404 `not_found` | base URL carries a path past `/v1`, or the endpoint is not proxied | Stop the base URL at `/v1` |
+| 404 `model_not_found` | typo in the model ID, or the ID is not on this key | Compare against step 2 |
+| 429 `insufficient_quota` | monthly, weekly, or rolling 5-hour cap hit | Wait out `Retry-After` in seconds; ask the operator to raise the cap |
+| 500 `internal_error` | proxy-side database or lock failure | Report to the operator; do not retry in a loop |
+| 502 `upstream_unavailable` | transient upstream failure, no `Retry-After` sent | Wait a few seconds, retry once |
+| Model missing from `/model` | authentication did not resolve | Check that `apiKey` expands to a non-empty value; `pi --list-models` breaks too |
 
-## 禁止
+## Forbidden
 
-- キーをリポジトリやコミットに含めない。共有するならユーザーに確認する。
-- 既存のプロバイダ、モデル、`compat`、`modelOverrides` を消さない・書き換えない。
-- `models.json` を丸ごと上書きしない。読んで、足して、書き戻す。
-- 検証を通すために、別のエンドポイントへフォールバックしない。失敗は失敗として報告する。
+- Do not put the key into a repository or a commit. Ask the user before sharing it.
+- Do not delete or rewrite existing providers, models, `compat`, or `modelOverrides`.
+- Do not overwrite `models.json` wholesale, and do not read and write it through the same open
+  file.
+- Do not fall back to another endpoint to make verification pass. Report failures as failures.
 
-## 報告すること
+## Report
 
-1. 変更したファイルの絶対パスと、追記した範囲
-2. `/v1/models` が返したモデル ID
-3. `pi --model ... -p` の結果(応答が出たか)
-4. キーは伏せて、末尾 4 文字だけ
+1. Absolute path of every file changed, and the range you added
+2. The model IDs `GET /v1/models` returned
+3. The result of `pi --model ... -p` (did a response come back?)
+4. The key masked to its last four characters

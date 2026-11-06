@@ -1,67 +1,70 @@
-# ai-proxy に coding agent を繋ぐ
+# Connecting a coding agent to ai-proxy
 
-このディレクトリの各ファイルは、**そのままコーディングエージェントに貼る指示書**である。
-やることは 2 つだけ: キーを受け取る、プロンプトを貼る。
+Each file in this directory is a **self-contained instruction sheet meant to be pasted into a
+coding agent**. There are only two steps: receive a key, paste the prompt.
 
-| ファイル | 対象 | エージェントが触るファイル |
+| File | Client | File the agent edits |
 | --- | --- | --- |
 | [`opencode.md`](opencode.md) | opencode | `~/.config/opencode/opencode.jsonc` |
 | [`pi.md`](pi.md) | pi | `~/.pi/agent/models.json` |
 
-## 1. キーを受け取る
+## 1. Receive a key
 
-キーは `sk-aip-` で始まる。発行は管理者が行い、**キー全文は発行時にしか表示されない**
-ので、受け取ったらそのまま使う。
+Keys start with `sk-aip-`. They are issued by the operator, and **the full key is shown only
+once at issue time**, so use it as handed to you.
 
-キーごとに「使えるモデル」と「トークンの上限」が決まっている。上限は月次・週次・
-5 時間の 3 つの窓で、窓ごとに別々にかかる。
+Each key fixes which models it may call and how many tokens it may spend. Spending is capped
+in three separate windows: monthly, weekly, and a rolling 5-hour window.
 
-## 2. プロンプトを貼る
+## 2. Paste the prompt
 
-`opencode.md` か `pi.md` の中身を丸ごとコピーして、キーと一緒にエージェントへ渡す。
-設定のマージ、`GET /v1/models` での疎通確認、1 トークンの実走、変更点の報告まで
-指示書に入っている。
+Copy the whole content of `opencode.md` or `pi.md` and hand it to the agent together with the
+key. The sheet covers merging the config, checking connectivity with `GET /v1/models`,
+running a one-token request, and reporting what changed.
 
-## 接続先
+## Endpoint
 
 ```
 https://router.ht1.top/v1
 ```
 
-設定するのは `/v1` まで。`/v1/chat/completions` を書くと `/v1/v1/...` になって 404 になる。
+Configure the base URL up to `/v1`. Writing `/v1/chat/completions` produces `/v1/v1/...` and a
+404.
 
-## 使えるモデル
+## Available models
 
-キーごとの許可リストで決まる。`GET /v1/models` が返すものがすべてで、それ以外を
-投げると 403 `model_not_allowed`。
+Decided per key by its allowlist. Whatever `GET /v1/models` returns is what you may call;
+anything else returns 403 `model_not_allowed`.
 
 ```bash
 curl -sS https://router.ht1.top/v1/models -H "Authorization: Bearer $KEY"
 ```
 
-2026-11 時点の既定は `deepseek/deepseek-v4.1-flash`(文脈 1,000,000、出力 65,536、
-text + image)。
+As of 2026-11 the default is `deepseek/deepseek-v4.1-flash` (1,000,000 context, 65,536 max
+output, text + image input). The list is passed through from the upstream catalog, so fields
+such as `context_length` and `max_tokens` appear when the upstream supplies them; do not assume
+every entry carries limits.
 
-## 課金と消費
+## Cost and usage
 
-USD での金額とトークン消費は管理者側で集計される。クライアントからは見えない。
-上限に当たると 429 `insufficient_quota` と `Retry-After`(秒)が返るので、その秒数だけ
-待ってから投げ直す。上限を変えたいときは管理者に頼む。
+Spend in USD and token counts are aggregated on the operator's side. Clients cannot see them.
+When a cap is reached the proxy returns 429 `insufficient_quota` with `Retry-After` in
+seconds; wait that long before retrying. Ask the operator to raise a cap.
 
-## 検証済みの範囲
+## Verified
 
-2026-11-05 に、公開 URL 経由で両方を実際に通した。指示書に書いてある JSON をそのまま使い、
-1 トークンの応答が返り、記録が残ることを確認している。
+Both clients were driven through the public endpoint on 2026-11-05 using the JSON in these
+sheets. A one-token response came back and the usage record was written.
 
-| クライアント | 確認したこと |
+| Client | What was verified |
 | --- | --- |
-| pi | `pi --list-models ai-proxy` に `deepseek/deepseek-v4.1-flash` が出る。`pi --model ai-proxy/deepseek/deepseek-v4.1-flash -p ...` が `ok` を返す |
-| opencode | `opencode models` に `ai-proxy/deepseek/deepseek-v4.1-flash` が出る。`opencode run -m ai-proxy/deepseek/deepseek-v4.1-flash "..."` が `ok` を返す |
+| pi | `pi --list-models ai-proxy` lists `deepseek/deepseek-v4.1-flash`; `pi --model ai-proxy/deepseek/deepseek-v4.1-flash -p ...` replies `ok` |
+| opencode | `opencode models` lists `ai-proxy/deepseek/deepseek-v4.1-flash`; `opencode run -m ai-proxy/deepseek/deepseek-v4.1-flash "..."` replies `ok` |
 
-モデル ID にスラッシュが入っていても、どちらも `プロバイダ/モデル` で正しく解釈する。
+Model IDs contain a slash, and both clients still split `provider/model` correctly.
 
-## 未検証
+## Not verified
 
-- `/v1/responses` 経由で使うクライアント(指示書は chat completions 前提)
-- Windows、およびプロキシを経由する社内ネットワーク
-- キーのローテーション(古いキーを失効させて新しいキーを配る手順)
+- Clients that talk to `/v1/responses` (the sheets assume chat completions)
+- Windows, and corporate networks that force an HTTP proxy
+- Key rotation (revoking an old key and handing out a new one)

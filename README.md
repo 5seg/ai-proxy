@@ -140,7 +140,7 @@ Enter を 3 回叩けば推奨値が入る(月次 = `default_monthly_cap`、週�
 週次 → 月次)に見て、最初に当たった窓の名前を返す。並列リクエストは互いの消費を
 見ないので、上限ちょうどまで使ったキーが同時に投げると超える(既知の挙動)。
 
-キーは `Authorization: Bearer sk-aip-...`、`x-api-key`、`api-key` のどれでも受け付ける。
+キーは `Authorization: Bearer sk-aip-...` で受け付ける(`x-api-key` と `api-key` は未対応)。
 
 ## 集計と表示
 
