@@ -64,46 +64,25 @@ impl Config {
 }
 
 fn load(path: &Path) -> Result<(Config, Vec<Setting>)> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => Some(text),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(err) => return Err(err).with_context(|| format!("failed to read {}", path.display())),
-    };
-    let document: Option<toml::Value> = match &text {
-        Some(text) => Some(
-            toml::from_str(text).with_context(|| format!("failed to parse {}", path.display()))?,
-        ),
-        None => None,
-    };
-    let mut config: Config = match &text {
-        Some(text) => {
-            toml::from_str(text).with_context(|| format!("failed to parse {}", path.display()))?
+    // 設定ファイルが無いまま既定値で動くと、意図しない DB にキーを書いたり
+    // 平文で 0.0.0.0 を開いたりする。パスの取り違えは即座に失敗させる。
+    let text = fs::read_to_string(path).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            anyhow::anyhow!(
+                "config {} not found (pass --config with the full path)",
+                path.display()
+            )
+        } else {
+            anyhow::Error::new(err).context(format!("failed to read {}", path.display()))
         }
-        None => Config {
-            listen: default_listen(),
-            db_path: default_db_path(),
-            upstream_base_url: default_upstream_base_url(),
-            upstream_api_key: String::new(),
-            models: default_models(),
-            retention_days: default_retention_days(),
-            capture_ttl_hours: default_capture_ttl_hours(),
-            capture_max_bytes: default_capture_max_bytes(),
-            max_body_bytes: default_max_body_bytes(),
-            connect_timeout_secs: default_connect_timeout_secs(),
-            read_timeout_secs: default_read_timeout_secs(),
-            models_ttl_secs: default_models_ttl_secs(),
-            default_monthly_cap: default_monthly_cap(),
-            trusted_proxies: default_trusted_proxies(),
-        },
-    };
+    })?;
+    let document: toml::Value = toml::from_str(&text)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let mut config: Config = toml::from_str(&text)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
 
     let mut sources: Vec<(String, &'static str)> = Vec::new();
-    let in_file = |key: &str| {
-        document
-            .as_ref()
-            .and_then(|document| document.get(key))
-            .is_some()
-    };
+    let in_file = |key: &str| document.get(key).is_some();
 
     override_string(&mut config.listen, "LISTEN", "listen", in_file("listen"), &mut sources)?;
     if let Some(value) = env::var_os("AI_PROXY_DB_PATH") {

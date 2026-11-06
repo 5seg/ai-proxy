@@ -446,6 +446,11 @@ fn csv_escape(value: &str) -> String {
 
 fn run_key(config_path: &Path, command: KeyCommand) -> Result<()> {
     let config = Config::load(config_path)?;
+    eprintln!(
+        "config {} -> db {}",
+        config_path.display(),
+        config.db_path.display()
+    );
     let conn = db::open(&config.db_path)?;
     match command {
         KeyCommand::Add {
