@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -47,6 +48,72 @@ pub struct ModelConfig {
     pub id: String,
 }
 
+/// Every field of `Config` above. Keep in sync when the struct gains a field.
+const TOP_LEVEL_KEYS: &[&str] = &[
+    "listen",
+    "db_path",
+    "upstream_base_url",
+    "upstream_api_key",
+    "models",
+    "retention_days",
+    "capture_ttl_hours",
+    "capture_max_bytes",
+    "max_body_bytes",
+    "connect_timeout_secs",
+    "read_timeout_secs",
+    "models_ttl_secs",
+    "default_monthly_cap",
+    "trusted_proxies",
+];
+
+/// Every field of `ModelConfig`.
+const MODEL_KEYS: &[&str] = &["id"];
+
+/// TOML silently swallows keys in the wrong place: anything below the first
+/// `[[models]]` is a model table, and `Config` ignores names it does not know.
+/// Both make the resolved value drift from the file, so print them on stderr.
+fn warn_ignored_keys(document: &toml::Value, path: &Path) {
+    let Some(table) = document.as_table() else {
+        return;
+    };
+    for key in table.keys() {
+        if !TOP_LEVEL_KEYS.contains(&key.as_str()) {
+            eprintln!("warning: {}: unknown key `{key}` is ignored", path.display());
+        }
+    }
+
+    let mut misplaced = BTreeSet::new();
+    let mut unknown = BTreeSet::new();
+    let models = table.get("models").and_then(toml::Value::as_array);
+    for model in models.into_iter().flatten() {
+        let Some(model) = model.as_table() else {
+            continue;
+        };
+        for key in model.keys() {
+            if MODEL_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            if TOP_LEVEL_KEYS.contains(&key.as_str()) {
+                misplaced.insert(key.as_str());
+            } else {
+                unknown.insert(key.as_str());
+            }
+        }
+    }
+    for key in misplaced {
+        eprintln!(
+            "warning: {}: `{key}` inside `[[models]]` is ignored — top-level keys must sit above the first `[[models]]`",
+            path.display()
+        );
+    }
+    for key in unknown {
+        eprintln!(
+            "warning: {}: unknown key `{key}` inside `[[models]]` is ignored",
+            path.display()
+        );
+    }
+}
+
 pub struct Setting {
     pub name: String,
     pub value: String,
@@ -80,6 +147,7 @@ fn load(path: &Path) -> Result<(Config, Vec<Setting>)> {
         .with_context(|| format!("failed to parse {}", path.display()))?;
     let mut config: Config = toml::from_str(&text)
         .with_context(|| format!("failed to parse {}", path.display()))?;
+    warn_ignored_keys(&document, path);
 
     let mut sources: Vec<(String, &'static str)> = Vec::new();
     let in_file = |key: &str| document.get(key).is_some();

@@ -62,6 +62,7 @@ ai-proxy db rollup       # 日次集計を作る
 | `read_timeout_secs` | `AI_PROXY_READ_TIMEOUT_SECS` | 300 |
 
 環境変数はファイルより優先する。`AI_PROXY_MODELS` は許可リストを丸ごと置換する。どの値がどこから来たかは `ai-proxy config` が出す。
+未知のキーと、`[[models]]` より下に書いた上位設定は、TOML の配列テーブルに飲み込まれるため、警告を stderr に出して無視する。
 
 ## 4. 認証とキー
 

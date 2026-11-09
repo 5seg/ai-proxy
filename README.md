@@ -90,6 +90,7 @@ ai-proxy config --config ./ai-proxy.toml
 | `default_monthly_cap` | `AI_PROXY_DEFAULT_MONTHLY_CAP` | `60000000`(キー発行時の推奨値。`0` で上限なしを推奨) |
 
 環境変数は設定ファイルより優先する。`AI_PROXY_MODELS` を設定すると許可モデルが丸ごと置き換わる。
+未知のキーや、`[[models]]` の内側に書いた上位設定は警告を出して無視する。省略可の設定は最初の `[[models]]` より上に置く。
 `RUST_LOG` はそのまま効く(`RUST_LOG=ai_proxy=debug`)。
 
 `trusted_proxies` に入っている IP から来たリクエストだけ、`X-Real-IP` と
