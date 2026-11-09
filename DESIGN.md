@@ -12,7 +12,7 @@
 | --- | --- |
 | 上流 | command-code(OpenAI 互換)。base URL と API キーは設定ファイル |
 | 許可モデル | `deepseek/deepseek-v4.1-flash` のみ |
-| `/v1/models` | 制限付きキーには上記1件。`--all-models` キーには上流の `/models` を中継して返す |
+| `/v1/models` | 制限付きキーには上流カタログから上記1件を抜き出して返す。`--all-models` キーには上流の `/models` を中継して返す |
 | 対象エンドポイント | `/v1/chat/completions`、`/v1/responses` のパススルー |
 | 認証 | 下流は `Authorization: Bearer <proxy key>`。キーは端末ごとに1本 |
 | 強制 | モデル許可(403)とキーごとの月次トークン上限(429) |
@@ -136,9 +136,9 @@ ai-proxy key update 3MS4P2J3 --all-models --limit 500M
 
 無制限キーは `flash-fast` も通す。「flash-fast を許可しない」は許可リストの運用で守る。無制限キーにも効く拒否リストは実装していない。
 
-`/v1/models` の応答もキーで変わる。制限付きキーには許可リストを合成して返し、`--all-models` キーには上流の `/models` の本文をそのまま返す(96 モデル、`context_length` や `supported_endpoints` も含む)。キーの制限を一覧に出しても意味がないためである。上流の応答は `models_ttl_secs`(既定 300 秒)キャッシュし、取得に失敗したら許可リストに退避して警告を出す。
+`/v1/models` の応答もキーで変わる。制限付きキーには許可リストだけを上流の `/models` から抜き出して返すので、`context_length` や `supported_endpoints` も付く。上流が広告していない許可モデルは最小限の項目を合成して補う。`--all-models` キーには上流の `/models` の本文をそのまま返す(96 モデル)。キーの制限を一覧に出しても意味がないためである。上流の応答は `models_ttl_secs`(既定 300 秒)キャッシュし、取得に失敗したら許可リストの合成に退避して警告を出す。
 
-`/v1/models/{id}` は制限付きキーで許可外なら 404、`--all-models` キーなら任意の id に 200。
+`/v1/models/{id}` は上流カタログにあればその項目をそのまま返す。制限付きキーで許可外なら 404、`--all-models` キーは上流に無くても任意の id に 200(合成した項目)。
 
 `allow_all_models` は schema v2 で追加した。既存 DB は起動時に `ALTER TABLE` で移行し、既存キーは制限付きになる。
 
