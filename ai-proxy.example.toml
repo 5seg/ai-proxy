@@ -27,7 +27,7 @@ id = "deepseek/deepseek-v4.1-flash"
 # read_timeout_secs = 300
 
 # 上流のモデル一覧をキャッシュする秒数。/v1/models と /v1/models/{id} が上流カタログを引くたびに使う。
-# 0 にすると毎回取りに行く。
+# TTL 内なら上流が落ちていてもキャッシュで応答する。0 にすると毎回取りに行き、失敗は 502 になる。
 # models_ttl_secs = 300
 
 # 環境変数 AI_PROXY_* はこのファイルより優先する。

@@ -1,7 +1,6 @@
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, State};
-use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use axum::Json;
 use serde_json::{json, Value};
@@ -9,39 +8,8 @@ use serde_json::{json, Value};
 use crate::proxy::auth::AuthContext;
 use crate::proxy::{ApiError, AppState};
 
-const CREATED: i64 = 1_735_689_600;
-
-fn synthesized(id: &str) -> Value {
-    json!({
-        "id": id,
-        "object": "model",
-        "created": CREATED,
-        "owned_by": "ai-proxy",
-    })
-}
-
-fn synthesized_allowlist(state: &AppState) -> Vec<Value> {
-    let mut data: Vec<Value> = state
-        .config
-        .models
-        .iter()
-        .map(|model| synthesized(&model.id))
-        .collect();
-    sort_by_id(&mut data);
-    data
-}
-
 fn is_allowlisted(state: &AppState, id: &str) -> bool {
     state.config.models.iter().any(|model| model.id == id)
-}
-
-fn sort_by_id(data: &mut [Value]) {
-    data.sort_by(|left, right| {
-        left["id"]
-            .as_str()
-            .unwrap_or_default()
-            .cmp(right["id"].as_str().unwrap_or_default())
-    });
 }
 
 /// The upstream `data` array, keeping only the entries that carry a string `id`.
@@ -57,53 +25,53 @@ fn entries(body: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// The allowlist as catalogue entries: an id takes the upstream entry verbatim when the
-/// catalogue has it, and falls back to a synthesised entry when it does not.
-fn merged_allowlist(state: &AppState, upstream: &[Value]) -> Vec<Value> {
-    let mut data: Vec<Value> = state
-        .config
-        .models
+/// The catalogue entries a restricted key may see: the allowlist members the upstream
+/// advertises, in catalogue order. An allowlisted id the upstream does not advertise is left
+/// out rather than synthesised.
+fn restricted_entries(state: &AppState, upstream: &[Value]) -> Vec<Value> {
+    upstream
         .iter()
-        .map(|model| {
-            upstream
-                .iter()
-                .find(|entry| entry["id"].as_str() == Some(model.id.as_str()))
-                .cloned()
-                .unwrap_or_else(|| synthesized(&model.id))
+        .filter(|entry| {
+            entry["id"]
+                .as_str()
+                .is_some_and(|id| is_allowlisted(state, id))
         })
-        .collect();
-    sort_by_id(&mut data);
-    data
+        .cloned()
+        .collect()
 }
 
 fn list_response(data: Vec<Value>) -> Json<Value> {
     Json(json!({ "object": "list", "data": data }))
 }
 
-/// A restricted key sees the allowlist, filled in from the upstream catalogue. An unrestricted
+/// A restricted key sees its allowlist filtered out of the upstream catalogue. An unrestricted
 /// key sees everything the upstream advertises, because the allowlist cannot describe what that
-/// key may use. When the upstream is unreachable, both fall back to what they can synthesise.
+/// key may use. The catalogue is the only source of model entries, so an unreachable upstream is
+/// reported as `502 upstream_unavailable` instead of a synthesised answer.
 pub async fn list(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
-) -> Response {
+) -> Result<Json<Value>, ApiError> {
     match catalog(&state).await {
         Ok(body) => {
             if auth.allow_all_models {
-                return Json(body).into_response();
+                return Ok(Json(body));
             }
-            list_response(merged_allowlist(&state, &entries(&body))).into_response()
+            Ok(list_response(restricted_entries(&state, &entries(&body))))
         }
         Err(err) => {
             tracing::warn!(
                 error = %err,
-                "failed to fetch the upstream model list, answering with the allowlist"
+                "the upstream model list is unavailable"
             );
-            list_response(synthesized_allowlist(&state)).into_response()
+            Err(ApiError::upstream_unavailable())
         }
     }
 }
 
+/// The catalogue entry for `id`, returned verbatim. An id the catalogue does not advertise is
+/// `404 model_not_found` for either key kind; a restricted key is also rejected earlier when the
+/// id is outside its allowlist.
 pub async fn get(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -115,25 +83,24 @@ pub async fn get(
         return Err(ApiError::model_not_found(id));
     }
     match catalog(&state).await {
-        Ok(body) => {
-            let found = entries(&body)
-                .into_iter()
-                .find(|entry| entry["id"].as_str() == Some(id));
-            Ok(Json(found.unwrap_or_else(|| synthesized(id))))
-        }
+        Ok(body) => entries(&body)
+            .into_iter()
+            .find(|entry| entry["id"].as_str() == Some(id))
+            .map(Json)
+            .ok_or_else(|| ApiError::model_not_found(id)),
         Err(err) => {
             tracing::warn!(
                 error = %err,
-                "failed to fetch the upstream model list, answering with a synthesised entry"
+                "the upstream model list is unavailable"
             );
-            Ok(Json(synthesized(id)))
+            Err(ApiError::upstream_unavailable())
         }
     }
 }
 
-/// The upstream catalogue, fetched and cached as it arrives. Both endpoints answer from it, so
-/// callers keep the extra fields (`context_length`, `supported_endpoints`) that a synthesised
-/// entry would drop; a restricted allowlist is filtered out of it instead of being rebuilt.
+/// The upstream catalogue, fetched and cached as it arrives. It is the only source of model
+/// entries: a restricted allowlist is filtered out of it, never rebuilt, so callers keep the
+/// extra fields (`context_length`, `supported_endpoints`) and see any fetch failure as an error.
 async fn catalog(state: &AppState) -> anyhow::Result<serde_json::Value> {
     let ttl = Duration::from_secs(state.config.models_ttl_secs);
     if !ttl.is_zero() {

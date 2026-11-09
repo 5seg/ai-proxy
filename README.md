@@ -218,8 +218,8 @@ sudo vi /etc/ai-proxy/config.toml   # upstream_api_key と listen を書く
 | パス | 用途 |
 | --- | --- |
 | `GET /healthz` | 認証不要の生存確認。DB に1クエリ投げる |
-| `GET /v1/models` | 制限付きキーには上流カタログから絞った許可モデル、`--all-models` キーには上流の全モデル |
-| `GET /v1/models/{id}` | 制限付きキーは許可モデルのみ(それ以外 404)。`--all-models` キーは任意の id に 200 |
+| `GET /v1/models` | 制限付きキーには上流カタログから絞った許可モデル、`--all-models` キーには上流の全モデル。上流が取得できなければ 502 |
+| `GET /v1/models/{id}` | 上流カタログにある id のみ(無ければキー種別を問わず 404)。制限付きキーは許可モデルのみ |
 | `POST /v1/chat/completions` | 中継(ストリーム対応) |
 | `POST /v1/responses` | 中継(ストリーム対応) |
 
@@ -231,7 +231,8 @@ curl -s localhost:8787/v1/models -H "Authorization: Bearer $K"      # 許可モ�
 ```
 
 `--all-models` キーで `/v1/models` を叩くと、上流の `GET /models` をそのまま返す
-(`context_length` や `supported_endpoints` も含む)。制限付きキーでも上流カタログから許可モデルだけを
-抜き出して返すので `context_length` は付き、上流が広告していない許可モデルは最小限の項目を合成して補う。
-結果は `models_ttl_secs`(既定 300 秒)キャッシュし、上流の取得に失敗したときだけ許可モデルの
-最小限の応答に退避して警告ログを出す。
+(`context_length` や `supported_endpoints` も含む)。制限付きキーにはそのカタログから許可モデルだけを
+抜き出して返すので `context_length` も付く。応答は常に上流カタログの項目そのままで、
+上流が広告していない許可モデルは一覧にも `/v1/models/{id}` にも出ない。
+結果は `models_ttl_secs`(既定 300 秒)キャッシュし、TTL 内なら上流が落ちていてもキャッシュで応答する。
+上流から取得できないときは `502 upstream_unavailable` を返す。
